@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "buffer/frame.h"
-#include "buffer/page_file.h"
+#include "storage/page_file.h"
 #include "buffer/pool_hooks.h"
 #include "common/fixed_array.h"
 #include "storage/page.h"
