@@ -31,18 +31,18 @@ TEST(PagedFile, WritesAndReadsPageBack) {
   const std::filesystem::path path = TempFile("mvcc_paged_file_roundtrip.tmp");
   RemoveFileIfExists(path);
 
-  std::vector<std::byte> written(kPageSize);
-  FillPage(written, 7);
+  AlignedBuffer written(kPageSize);
+  FillPage(written.span(), 7);
   {
     PagedFile file(path, kPageSize);
-    file.WritePage(3, written);
+    file.WritePage(3, written.span());
     EXPECT_EQ(file.size_in_pages(), 4u);
   }
 
-  std::vector<std::byte> read(kPageSize);
+  AlignedBuffer read(kPageSize);
   {
     PagedFile file(path, kPageSize);
-    file.ReadPage(3, read);
+    file.ReadPage(3, read.span());
   }
   EXPECT_EQ(std::memcmp(written.data(), read.data(), kPageSize), 0);
 
@@ -53,23 +53,23 @@ TEST(PagedFile, KeepsPagesIndependent) {
   const std::filesystem::path path = TempFile("mvcc_paged_file_independent.tmp");
   RemoveFileIfExists(path);
 
-  std::vector<std::byte> first(kPageSize);
-  std::vector<std::byte> second(kPageSize);
-  FillPage(first, 11);
-  FillPage(second, 200);
+  AlignedBuffer first(kPageSize);
+  AlignedBuffer second(kPageSize);
+  FillPage(first.span(), 11);
+  FillPage(second.span(), 200);
 
   {
     PagedFile file(path, kPageSize);
-    file.WritePage(0, first);
-    file.WritePage(1, second);
+    file.WritePage(0, first.span());
+    file.WritePage(1, second.span());
   }
 
-  std::vector<std::byte> read(kPageSize);
   {
+    AlignedBuffer read(kPageSize);
     PagedFile file(path, kPageSize);
-    file.ReadPage(0, read);
+    file.ReadPage(0, read.span());
     EXPECT_EQ(std::memcmp(first.data(), read.data(), kPageSize), 0);
-    file.ReadPage(1, read);
+    file.ReadPage(1, read.span());
     EXPECT_EQ(std::memcmp(second.data(), read.data(), kPageSize), 0);
   }
 
@@ -80,10 +80,11 @@ TEST(PagedFile, RemoveFileIfExistsClearsOldContent) {
   const std::filesystem::path path = TempFile("mvcc_paged_file_remove.tmp");
   RemoveFileIfExists(path);
 
-  std::vector<std::byte> page(kPageSize, std::byte{0x5A});
+  AlignedBuffer page(kPageSize);
+  FillPage(page.span(), 0x5A);
   {
     PagedFile file(path, kPageSize);
-    file.WritePage(0, page);
+    file.WritePage(0, page.span());
     EXPECT_EQ(file.size_in_pages(), 1u);
   }
   ASSERT_TRUE(std::filesystem::exists(path));
@@ -105,45 +106,22 @@ TEST(PagedFile, RejectsUndersizedBuffer) {
 
   {
     PagedFile file(path, kPageSize);
-    std::vector<std::byte> small(kPageSize - 8);
-    EXPECT_THROW(file.WritePage(0, small), std::invalid_argument);
-    EXPECT_THROW(file.ReadPage(0, small), std::invalid_argument);
+    AlignedBuffer small(kPageSize - 8);
+    EXPECT_THROW(file.WritePage(0, small.span()), std::invalid_argument);
+    EXPECT_THROW(file.ReadPage(0, small.span()), std::invalid_argument);
   }
 
   RemoveFileIfExists(path);
 }
 
-TEST(PagedFile, DirectModeRoundTripsSectorAlignedPages) {
-  const std::filesystem::path path = TempFile("mvcc_paged_file_direct.tmp");
+TEST(PagedFile, RejectsUnalignedBuffersAndPageSizes) {
+  const std::filesystem::path path = TempFile("mvcc_paged_file_alignment.tmp");
   RemoveFileIfExists(path);
 
-  constexpr size_t kBigPage = 64 * 1024;
-  AlignedBuffer written(kBigPage);
-  FillPage(written.span(), 13);
-  {
-    PagedFile file(path, kBigPage, IoMode::kDirect);
-    file.WritePage(2, written.span());
-    EXPECT_EQ(file.size_in_pages(), 3u);
-  }
+  EXPECT_THROW(PagedFile(path, kPageSize + 512), std::invalid_argument);
 
   {
-    AlignedBuffer read(kBigPage);
-    PagedFile file(path, kBigPage, IoMode::kDirect);
-    file.ReadPage(2, read.span());
-    EXPECT_EQ(std::memcmp(written.data(), read.data(), kBigPage), 0);
-  }
-
-  RemoveFileIfExists(path);
-}
-
-TEST(PagedFile, DirectModeRejectsUnalignedBuffersAndPageSizes) {
-  const std::filesystem::path path = TempFile("mvcc_paged_file_direct_guard.tmp");
-  RemoveFileIfExists(path);
-
-  EXPECT_THROW(PagedFile(path, kPageSize + 512, IoMode::kDirect), std::invalid_argument);
-
-  {
-    PagedFile file(path, kPageSize, IoMode::kDirect);
+    PagedFile file(path, kPageSize);
     std::vector<std::byte> raw(kPageSize + kSectorBytes);
     const std::span<std::byte> misaligned = std::span(raw).subspan(1, kPageSize);
     EXPECT_THROW(file.ReadPage(0, misaligned), std::invalid_argument);

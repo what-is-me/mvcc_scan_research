@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include "common/aligned_buffer.h"
 #include "storage/page.h"
 #include "storage/paged_file.h"
 #include "storage/table_builder.h"
@@ -41,11 +42,11 @@ TEST(TableBuilder, FillsEveryRowWithDerivedData) {
     PagedFile file(path, layout.page_size());
     ASSERT_EQ(file.size_in_pages(), layout.page_count());
 
-    std::vector<std::byte> raw(layout.page_size());
+    AlignedBuffer raw(layout.page_size());
     const size_t words_per_row = layout.data_size() / sizeof(uint64_t);
     for (const size_t page_index : {size_t{0}, layout.page_count() - 1}) {
-      file.ReadPage(page_index, raw);
-      const Page page(raw, layout);
+      file.ReadPage(page_index, raw.span());
+      const Page page(raw.span(), layout);
       ASSERT_EQ(page.row_count(), layout.rows_per_page());
 
       for (size_t slot = 0; slot < page.row_count(); ++slot) {
@@ -70,16 +71,16 @@ TEST(TableBuilder, ZeroesPageTailWaste) {
   const std::filesystem::path path = TempFile("mvcc_build_tail.tmp");
   BuildBaseFile(path, layout);
 
-  std::vector<std::byte> raw(layout.page_size());
+  AlignedBuffer raw(layout.page_size());
   {
     PagedFile file(path, layout.page_size());
-    file.ReadPage(0, raw);
+    file.ReadPage(0, raw.span());
   }
 
   const size_t used = layout.rows_per_page() * layout.row_size();
   ASSERT_LT(used, layout.page_size());
   for (size_t offset = used; offset < layout.page_size(); ++offset) {
-    ASSERT_EQ(std::to_integer<int>(raw[offset]), 0) << "offset " << offset;
+    ASSERT_EQ(std::to_integer<int>(raw.span()[offset]), 0) << "offset " << offset;
   }
 
   RemoveFileIfExists(path);
@@ -102,9 +103,9 @@ TEST(TableBuilder, RebuildDropsPreviousContent) {
     PagedFile file(path, narrow.page_size());
     EXPECT_EQ(file.size_in_pages(), narrow.page_count());
 
-    std::vector<std::byte> raw(narrow.page_size());
-    file.ReadPage(0, raw);
-    const Page page(raw, narrow);
+    AlignedBuffer raw(narrow.page_size());
+    file.ReadPage(0, raw.span());
+    const Page page(raw.span(), narrow);
     EXPECT_EQ(ReadWord(page.RowAt(0).data(), 0), RowDataWord(0, 0));
   }
 

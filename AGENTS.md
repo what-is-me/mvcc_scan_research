@@ -118,8 +118,9 @@ static 可变状态。组件间除稳定关系（如 Scanner 持有 Table 引用
   **页内追加无须任何原子操作**。线程终止时最后一页允许留有空洞。
   该设计对 defer-页式有天然收益：同一线程相近时间更新的行（常为热点行）
   的 undo 记录落在相同或相邻页，共页局部性好。
-- 文件 I/O 以页为单位、显式偏移读写，不依赖文件指针位置；是否绕过系统
-  页缓存由 `io_mode` 决定（§11），`direct` 时页缓冲必须按扇区对齐。
+- 文件 I/O 以页为单位、显式偏移读写，不依赖文件指针位置；**一律绕过系统
+  页缓存**（Windows 用 FILE_FLAG_NO_BUFFERING，POSIX 用 O_DIRECT），因此
+  页大小必须是扇区大小的整数倍，页缓冲必须扇区对齐。
 
 ## 7. Buffer Pool 与替换策略
 
@@ -357,7 +358,6 @@ read_ts 的历史节点永远不会被触碰。扫描对某行实际遍历的跳
 | 页大小 | 64 KB | 8 / 16 / 32 / 64 KB |
 | 行宽（含 16 B 版本戳与 undo_row_id 头） | 128 B | 64 / 128 / 256 B |
 | 表行数 | 200 万 | 50 万 / 200 万 / 800 万 |
-| I/O 模式 | direct（绕过系统页缓存） | buffered / direct |
 | 基表缓冲池大小 | 128 MB | 32 / 64 / 128 / 256 MB |
 | undo 缓冲池大小 | 64 MB | 16 / 32 / 64 MB |
 | undo 文件容量上限 | 16 GB | 按实验时长估算，见下 |
@@ -375,18 +375,18 @@ read_ts 的历史节点永远不会被触碰。扫描对某行实际遍历的跳
 默认值设计逻辑：基表约 244 MB、基表池 128 MB ≈ 表一半，保证扫描必然触发
 淘汰、替换策略差异可见。
 
-**I/O 模式决定实验代表的是哪一类系统，两种口径不可混在一张图里比较。**
-默认 `direct`（Windows 为 FILE_FLAG_NO_BUFFERING，POSIX 为 O_DIRECT）：文件
-绕过系统页缓存，缓冲池未命中就是一次真实设备读，与磁盘数据库一致。本机
-实测 64 KB 页、3907 页，一次全表扫描约 390 ms（约 99 µs/页），故扫描间隔取
-1000 ms，占空比约 39%。`buffered` 时系统页缓存会把整表兜住，未命中退化为
-一次内存拷贝，同样一次扫描约 68 ms（约 17 µs/页），对应"工作集常驻内存"
-的一类系统，此时间隔可用 200 ms。**间隔是相邻两次扫描起始时刻之差**，不是
-"结束后再等"。换机器或换存储介质后应重测这两个常数再定。
+**I/O 一律绕过系统页缓存**（Windows 为 FILE_FLAG_NO_BUFFERING，POSIX 为
+O_DIRECT）：缓冲池是唯一的页缓存，若让系统页缓存再兜一层，缓冲池未命中就
+退化成一次内存拷贝，命中率与替换策略的差异会被抹平，实验失去意义。代价是
+每次未命中都是真实设备读：本机实测 64 KB 页、3907 页，一次全表扫描约
+390 ms（约 99 µs/页），故扫描间隔取 1000 ms，占空比约 39%。由此也要求
+页大小为扇区大小（4096 B）的整数倍，页缓冲按扇区对齐。**间隔是相邻两次
+扫描起始时刻之差**，不是"结束后再等"。换机器或换存储介质后应重测这两个
+常数再定。
 
-页大小取 64 KB 而非更常见的 8 KB：两种模式下定位读都有明显的一次性开销
-（direct 约 99 µs/页、buffered 约 7.5–8 µs 固定开销加拷贝），8 KB 页会让
-一次扫描的调用次数翻 8 倍，扫描被 I/O 主导而非版本解析。
+页大小取 64 KB 而非更常见的 8 KB：无缓冲 I/O 下每次读都要付一次设备延迟，
+8 KB 页会让一次扫描的读次数翻 8 倍（31250 次），扫描彻底被 I/O 主导，
+版本解析的成本就测不出来了。
 
 **undo 文件容量估算**（无 GC，undo 随实验时长线性增长）：容量上限 ≥
 实验时长 × 聚合更新速率 × 行宽，须留余量；超限时启动即报错而非运行中失败。
@@ -427,10 +427,7 @@ read_ts 的历史节点永远不会被触碰。扫描对某行实际遍历的跳
 
 - 扫描端到端延迟（分主扫描与版本解析两段计时）；
 - 基表池 / undo 池各自的逻辑读、物理读（I/O 次数）、命中率；
-  **语义随 io_mode 而定**（§11）：`direct` 时文件绕过系统页缓存，物理读
-  就是真实设备读；`buffered` 时系统页缓存是第二层缓存，物理读实为"缓冲池
-  未命中次数"。两个口径的绝对值不可横向比较，只有在同一 io_mode 内部的
-  策略差异才有意义。
+  文件以无缓冲方式打开，物理读就是真实设备读，两个池的数字可直接比较。
 - 扫描期间 TP 吞吐与延迟（对照无扫描基线的退化幅度）；
 - 写冲突率；
 - **链均跳数**：扫描过程中对走链行数与总跳数顺带计数（均值 = 总跳数 /
@@ -450,7 +447,7 @@ read_ts 的历史节点永远不会被触碰。扫描对某行实际遍历的跳
 ~~~
 顶层字段（按书写顺序，details 之前）：
   experiment_id, scan_policy, replacer, page_size_kb, row_size_b,
-  table_rows, io_mode, base_pool_mb, undo_pool_mb, tp_threads, key_dist,
+  table_rows, base_pool_mb, undo_pool_mb, tp_threads, key_dist,
   key_mapping, rows_per_txn, scan_interval_ms, scan_access_mode,
   duration_s, scan_count, scan_latency_ms_p50, scan_latency_ms_p99,
   main_scan_ms_p50, resolve_ms_p50, base_logical_reads,
@@ -463,8 +460,7 @@ read_ts 的历史节点永远不会被触碰。扫描对某行实际遍历的跳
   replacer ∈ {lru, clock, mru, arc, lru_k}；
   key_dist ∈ {uniform, zipf0.5, zipf0.8, zipf1.1}；
   key_mapping ∈ {scattered, head}；
-  scan_access_mode ∈ {scan, normal}；
-  io_mode ∈ {buffered, direct}
+  scan_access_mode ∈ {scan, normal}
 
 details[]（数组，最后一个字段；元素按 scan_seq 升序，自 1 起）：
   scan_seq, start_time_s, main_scan_ms, resolve_ms, chain_rows,

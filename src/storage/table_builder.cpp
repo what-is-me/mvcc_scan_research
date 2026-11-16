@@ -27,10 +27,10 @@ uint64_t RowDataWord(size_t linear_row, size_t word_index) {
              static_cast<uint64_t>(word_index) * 0xBF58476D1CE4E5B9ull);
 }
 
-void BuildBaseFile(const std::filesystem::path& path, const TableLayout& layout, IoMode mode) {
+void BuildBaseFile(const std::filesystem::path& path, const TableLayout& layout) {
   RemoveFileIfExists(path);
 
-  PagedFile file(path, layout.page_size(), mode);
+  PagedFile file(path, layout.page_size());
   AlignedBuffer buffer(layout.page_size());
   std::fill(buffer.span().begin(), buffer.span().end(), std::byte{0});
 

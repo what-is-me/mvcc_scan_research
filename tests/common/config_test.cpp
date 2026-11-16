@@ -32,7 +32,6 @@ TEST(Config, DefaultsMatchDocumentedValues) {
   EXPECT_EQ(config.page_size_kb, 64u);
   EXPECT_EQ(config.row_size_b, 128u);
   EXPECT_EQ(config.table_rows, 2'000'000u);
-  EXPECT_EQ(config.io_mode, IoMode::kDirect);
   EXPECT_EQ(config.base_pool_mb, 128u);
   EXPECT_EQ(config.undo_pool_mb, 64u);
   EXPECT_EQ(config.undo_capacity_gb, 16u);
@@ -48,20 +47,10 @@ TEST(Config, DefaultsMatchDocumentedValues) {
   EXPECT_EQ(config.results_dir, "./results");
 }
 
-TEST(Config, ParsesIoMode) {
+TEST(Config, RejectsPageSizeNotMultipleOfSector) {
   Config config;
-  std::string error;
-  ASSERT_TRUE(config.Set("io_mode", "buffered", &error)) << error;
-  EXPECT_EQ(config.io_mode, IoMode::kBuffered);
-  EXPECT_FALSE(config.Set("io_mode", "osync", &error));
-  EXPECT_EQ(config.io_mode, IoMode::kBuffered);
-}
-
-TEST(Config, DirectModeRequiresSectorAlignedPageSize) {
-  Config config;
-  config.io_mode = IoMode::kDirect;
   config.page_size_kb = 3;
-  EXPECT_NE(config.Validate().find("io_mode"), std::string::npos);
+  EXPECT_NE(config.Validate().find("page_size_kb"), std::string::npos);
 
   config.page_size_kb = 4;
   EXPECT_EQ(config.Validate(), std::string{});

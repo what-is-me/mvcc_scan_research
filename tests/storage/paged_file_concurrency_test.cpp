@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include "common/aligned_buffer.h"
 #include "storage/paged_file.h"
 
 namespace mvcc {
@@ -42,11 +43,11 @@ void WriteAllPagesConcurrently(PagedFile& file) {
   std::vector<std::thread> workers;
   for (size_t thread = 0; thread < kThreads; ++thread) {
     workers.emplace_back([&file, &next] {
-      std::vector<std::byte> buffer(kPageSize);
+      AlignedBuffer buffer(kPageSize);
       for (size_t index = 0; index < kPagesPerThread; ++index) {
         const size_t page = next.fetch_add(1);
-        FillForPage(buffer, page);
-        file.WritePage(page, buffer);
+        FillForPage(buffer.span(), page);
+        file.WritePage(page, buffer.span());
       }
     });
   }
@@ -67,11 +68,11 @@ TEST(PagedFileConcurrency, ConcurrentWritesToDistinctPagesStayIntact) {
 
   {
     PagedFile file(path, kPageSize);
-    std::vector<std::byte> buffer(kPageSize);
+    AlignedBuffer buffer(kPageSize);
     size_t corrupted = 0;
     for (size_t page = 0; page < kTotalPages; ++page) {
-      file.ReadPage(page, buffer);
-      if (!MatchesPage(buffer, page)) ++corrupted;
+      file.ReadPage(page, buffer.span());
+      if (!MatchesPage(buffer.span(), page)) ++corrupted;
     }
     EXPECT_EQ(corrupted, 0u);
   }
@@ -95,12 +96,12 @@ TEST(PagedFileConcurrency, ConcurrentReadsSeeCompletePages) {
     std::vector<std::thread> readers;
     for (size_t thread = 0; thread < kThreads; ++thread) {
       readers.emplace_back([&file, &next, &corrupted] {
-        std::vector<std::byte> buffer(kPageSize);
+        AlignedBuffer buffer(kPageSize);
         for (;;) {
           const size_t page = next.fetch_add(1);
           if (page >= kTotalPages) break;
-          file.ReadPage(page, buffer);
-          if (!MatchesPage(buffer, page)) corrupted.fetch_add(1);
+          file.ReadPage(page, buffer.span());
+          if (!MatchesPage(buffer.span(), page)) corrupted.fetch_add(1);
         }
       });
     }

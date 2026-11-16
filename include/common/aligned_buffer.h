@@ -4,16 +4,15 @@
 #include <new>
 #include <span>
 
-#include "common/io_mode.h"
-
 namespace mvcc {
 
-// 按扇区对齐的定长字节缓冲。无缓冲 I/O 要求缓冲区地址、文件偏移与长度
-// 三者都对齐到扇区，页数据与建表缓冲都从这里来。
+// 无缓冲 I/O 要求偏移、长度与缓冲区地址对齐到的字节数。
+inline constexpr size_t kSectorBytes = 4096;
+
+// 按扇区对齐的定长字节缓冲。文件一律以无缓冲方式读写，缓冲区地址、文件
+// 偏移与传输长度三者都必须对齐到扇区；页数据与建表缓冲都从这里来。
 class AlignedBuffer {
  public:
-  static constexpr size_t kSectorBytes = mvcc::kSectorBytes;
-
   explicit AlignedBuffer(size_t bytes, size_t alignment = kSectorBytes)
       : size_(bytes),
         alignment_(alignment),
