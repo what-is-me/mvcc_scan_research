@@ -102,10 +102,12 @@ TEST(PagedFile, RejectsUndersizedBuffer) {
   const std::filesystem::path path = TempFile("mvcc_paged_file_size.tmp");
   RemoveFileIfExists(path);
 
-  PagedFile file(path, kPageSize);
-  std::vector<std::byte> small(kPageSize - 8);
-  EXPECT_THROW(file.WritePage(0, small), std::invalid_argument);
-  EXPECT_THROW(file.ReadPage(0, small), std::invalid_argument);
+  {
+    PagedFile file(path, kPageSize);
+    std::vector<std::byte> small(kPageSize - 8);
+    EXPECT_THROW(file.WritePage(0, small), std::invalid_argument);
+    EXPECT_THROW(file.ReadPage(0, small), std::invalid_argument);
+  }
 
   RemoveFileIfExists(path);
 }

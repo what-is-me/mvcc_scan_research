@@ -27,7 +27,7 @@ class MemoryPageFile : public PageFile {
     reads.fetch_add(1, std::memory_order_relaxed);
   }
 
-  void WritePage(PageId page, std::span<std::byte> src) override {
+  void WritePage(PageId page, std::span<const std::byte> src) override {
     std::memcpy(data_.data() + page * page_size_, src.data(), page_size_);
     writes.fetch_add(1, std::memory_order_relaxed);
   }

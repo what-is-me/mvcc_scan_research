@@ -34,6 +34,7 @@ namespace {
 void RemoveFileIfExists(const std::filesystem::path& path) {
   std::error_code error;
   std::filesystem::remove(path, error);
+  if (error) throw std::system_error(error, "cannot remove file: " + path.string());
 }
 
 PagedFile::PagedFile(const std::filesystem::path& path, size_t page_size)
@@ -84,7 +85,7 @@ void PagedFile::ReadPage(PageId page, std::span<std::byte> dst) {
 #endif
 }
 
-void PagedFile::WritePage(PageId page, std::span<std::byte> src) {
+void PagedFile::WritePage(PageId page, std::span<const std::byte> src) {
   if (src.size() < page_size_) throw std::invalid_argument("page buffer smaller than page size");
 
   const uint64_t offset = page * page_size_;

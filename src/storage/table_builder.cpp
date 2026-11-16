@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 
 #include "common/fixed_array.h"
 #include "storage/page.h"
@@ -48,6 +50,12 @@ void BuildBaseFile(const std::filesystem::path& path, const TableLayout& layout)
       }
     }
     file.WritePage(static_cast<PageId>(page_index), buffer.span());
+  }
+
+  const size_t written = file.size_in_pages();
+  if (written != layout.page_count()) {
+    throw std::runtime_error("base file has " + std::to_string(written) + " pages, expected " +
+                             std::to_string(layout.page_count()));
   }
 }
 

@@ -37,25 +37,27 @@ TEST(TableBuilder, FillsEveryRowWithDerivedData) {
   const std::filesystem::path path = TempFile("mvcc_build_base.tmp");
   BuildBaseFile(path, layout);
 
-  PagedFile file(path, layout.page_size());
-  ASSERT_EQ(file.size_in_pages(), layout.page_count());
+  {
+    PagedFile file(path, layout.page_size());
+    ASSERT_EQ(file.size_in_pages(), layout.page_count());
 
-  std::vector<std::byte> raw(layout.page_size());
-  const size_t words_per_row = layout.data_size() / sizeof(uint64_t);
-  for (const size_t page_index : {size_t{0}, layout.page_count() - 1}) {
-    file.ReadPage(page_index, raw);
-    const Page page(raw, layout);
-    ASSERT_EQ(page.row_count(), layout.rows_per_page());
+    std::vector<std::byte> raw(layout.page_size());
+    const size_t words_per_row = layout.data_size() / sizeof(uint64_t);
+    for (const size_t page_index : {size_t{0}, layout.page_count() - 1}) {
+      file.ReadPage(page_index, raw);
+      const Page page(raw, layout);
+      ASSERT_EQ(page.row_count(), layout.rows_per_page());
 
-    for (size_t slot = 0; slot < page.row_count(); ++slot) {
-      const size_t linear_row = page_index * layout.rows_per_page() + slot;
-      const Row row = page.RowAt(slot);
-      EXPECT_EQ(row.version(), VersionStamp{});
-      EXPECT_FALSE(row.version().locked());
-      EXPECT_EQ(row.undo_row_id(), RowId::Null());
-      for (size_t word = 0; word < words_per_row; ++word) {
-        ASSERT_EQ(ReadWord(row.data(), word), RowDataWord(linear_row, word))
-            << "row " << linear_row << " word " << word;
+      for (size_t slot = 0; slot < page.row_count(); ++slot) {
+        const size_t linear_row = page_index * layout.rows_per_page() + slot;
+        const Row row = page.RowAt(slot);
+        EXPECT_EQ(row.version(), VersionStamp{});
+        EXPECT_FALSE(row.version().locked());
+        EXPECT_EQ(row.undo_row_id(), RowId::Null());
+        for (size_t word = 0; word < words_per_row; ++word) {
+          ASSERT_EQ(ReadWord(row.data(), word), RowDataWord(linear_row, word))
+              << "row " << linear_row << " word " << word;
+        }
       }
     }
   }
@@ -68,9 +70,11 @@ TEST(TableBuilder, ZeroesPageTailWaste) {
   const std::filesystem::path path = TempFile("mvcc_build_tail.tmp");
   BuildBaseFile(path, layout);
 
-  PagedFile file(path, layout.page_size());
   std::vector<std::byte> raw(layout.page_size());
-  file.ReadPage(0, raw);
+  {
+    PagedFile file(path, layout.page_size());
+    file.ReadPage(0, raw);
+  }
 
   const size_t used = layout.rows_per_page() * layout.row_size();
   ASSERT_LT(used, layout.page_size());
@@ -94,13 +98,15 @@ TEST(TableBuilder, RebuildDropsPreviousContent) {
   const TableLayout narrow(4096, 64, 1000);
   BuildBaseFile(path, narrow);
 
-  PagedFile file(path, narrow.page_size());
-  EXPECT_EQ(file.size_in_pages(), narrow.page_count());
+  {
+    PagedFile file(path, narrow.page_size());
+    EXPECT_EQ(file.size_in_pages(), narrow.page_count());
 
-  std::vector<std::byte> raw(narrow.page_size());
-  file.ReadPage(0, raw);
-  const Page page(raw, narrow);
-  EXPECT_EQ(ReadWord(page.RowAt(0).data(), 0), RowDataWord(0, 0));
+    std::vector<std::byte> raw(narrow.page_size());
+    file.ReadPage(0, raw);
+    const Page page(raw, narrow);
+    EXPECT_EQ(ReadWord(page.RowAt(0).data(), 0), RowDataWord(0, 0));
+  }
 
   RemoveFileIfExists(path);
 }

@@ -9,11 +9,13 @@
 
 namespace mvcc {
 
-// 每次实验重建文件：先删除旧文件，不存在时忽略。
+// 每次实验重建文件：先删除旧文件，不存在时忽略；删除失败抛异常，
+// 避免"旧文件没删掉、新内容覆盖前面若干页、尾部残留"的静默错乱。
 void RemoveFileIfExists(const std::filesystem::path& path);
 
 // 定位读写实现：Windows 用带 OVERLAPPED 偏移的 ReadFile/WriteFile，
-// 其他平台用 pread/pwrite，因此多个线程可以并发读写同一文件。
+// 其他平台用 pread/pwrite。偏移随每次调用传入，既不读也不改文件指针，
+// 所以多个线程可以对同一对象并发读写不同页。
 class PagedFile final : public PageFile {
  public:
   PagedFile(const std::filesystem::path& path, size_t page_size);
@@ -23,9 +25,10 @@ class PagedFile final : public PageFile {
   PagedFile& operator=(const PagedFile&) = delete;
 
   void ReadPage(PageId page, std::span<std::byte> dst) override;
-  void WritePage(PageId page, std::span<std::byte> src) override;
+  void WritePage(PageId page, std::span<const std::byte> src) override;
 
   size_t page_size() const { return page_size_; }
+  // 文件当前页数的快照；有并发写入时结果只是某一瞬间的值，仅在写入停止后有意义。
   size_t size_in_pages() const;
 
  private:
