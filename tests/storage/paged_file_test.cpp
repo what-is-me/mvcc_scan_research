@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include "common/aligned_buffer.h"
 #include "storage/paged_file.h"
 
 namespace mvcc {
@@ -107,6 +108,51 @@ TEST(PagedFile, RejectsUndersizedBuffer) {
     std::vector<std::byte> small(kPageSize - 8);
     EXPECT_THROW(file.WritePage(0, small), std::invalid_argument);
     EXPECT_THROW(file.ReadPage(0, small), std::invalid_argument);
+  }
+
+  RemoveFileIfExists(path);
+}
+
+TEST(PagedFile, DirectModeRoundTripsSectorAlignedPages) {
+  const std::filesystem::path path = TempFile("mvcc_paged_file_direct.tmp");
+  RemoveFileIfExists(path);
+
+  constexpr size_t kBigPage = 64 * 1024;
+  AlignedBuffer written(kBigPage);
+  FillPage(written.span(), 13);
+  {
+    PagedFile file(path, kBigPage, IoMode::kDirect);
+    file.WritePage(2, written.span());
+    EXPECT_EQ(file.size_in_pages(), 3u);
+  }
+
+  {
+    AlignedBuffer read(kBigPage);
+    PagedFile file(path, kBigPage, IoMode::kDirect);
+    file.ReadPage(2, read.span());
+    EXPECT_EQ(std::memcmp(written.data(), read.data(), kBigPage), 0);
+  }
+
+  RemoveFileIfExists(path);
+}
+
+TEST(PagedFile, DirectModeRejectsUnalignedBuffersAndPageSizes) {
+  const std::filesystem::path path = TempFile("mvcc_paged_file_direct_guard.tmp");
+  RemoveFileIfExists(path);
+
+  EXPECT_THROW(PagedFile(path, kPageSize + 512, IoMode::kDirect), std::invalid_argument);
+
+  {
+    PagedFile file(path, kPageSize, IoMode::kDirect);
+    std::vector<std::byte> raw(kPageSize + kSectorBytes);
+    const std::span<std::byte> misaligned = std::span(raw).subspan(1, kPageSize);
+    EXPECT_THROW(file.ReadPage(0, misaligned), std::invalid_argument);
+    EXPECT_THROW(file.WritePage(0, misaligned), std::invalid_argument);
+
+    AlignedBuffer aligned(kPageSize);
+    FillPage(aligned.span(), 21);
+    EXPECT_NO_THROW(file.WritePage(0, aligned.span()));
+    EXPECT_NO_THROW(file.ReadPage(0, aligned.span()));
   }
 
   RemoveFileIfExists(path);

@@ -29,6 +29,13 @@ namespace {
 #endif
 }
 
+void CheckBufferAlignment(std::span<const std::byte> buffer, IoMode mode) {
+  if (mode == IoMode::kDirect &&
+      reinterpret_cast<uintptr_t>(buffer.data()) % kSectorBytes != 0) {
+    throw std::invalid_argument("direct I/O requires a sector-aligned buffer");
+  }
+}
+
 }  // namespace
 
 void RemoveFileIfExists(const std::filesystem::path& path) {
@@ -37,16 +44,23 @@ void RemoveFileIfExists(const std::filesystem::path& path) {
   if (error) throw std::system_error(error, "cannot remove file: " + path.string());
 }
 
-PagedFile::PagedFile(const std::filesystem::path& path, size_t page_size)
-    : path_(path), page_size_(page_size) {
+PagedFile::PagedFile(const std::filesystem::path& path, size_t page_size, IoMode mode)
+    : path_(path), page_size_(page_size), mode_(mode) {
+  if (mode_ == IoMode::kDirect && page_size_ % kSectorBytes != 0) {
+    throw std::invalid_argument("direct I/O requires a sector-aligned page size");
+  }
 #ifdef _WIN32
+  DWORD attributes = FILE_ATTRIBUTE_NORMAL;
+  if (mode_ == IoMode::kDirect) attributes |= FILE_FLAG_NO_BUFFERING;
   const HANDLE handle =
       ::CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                    nullptr, OPEN_ALWAYS, attributes, nullptr);
   if (handle == INVALID_HANDLE_VALUE) ThrowIoError("cannot open file", path_);
   handle_ = handle;
 #else
-  const int fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0644);
+  int flags = O_RDWR | O_CREAT;
+  if (mode_ == IoMode::kDirect) flags |= O_DIRECT;
+  const int fd = ::open(path.c_str(), flags, 0644);
   if (fd < 0) ThrowIoError("cannot open file", path_);
   fd_ = fd;
 #endif
@@ -62,6 +76,7 @@ PagedFile::~PagedFile() {
 
 void PagedFile::ReadPage(PageId page, std::span<std::byte> dst) {
   if (dst.size() < page_size_) throw std::invalid_argument("page buffer smaller than page size");
+  CheckBufferAlignment(dst, mode_);
 
   const uint64_t offset = page * page_size_;
 #ifdef _WIN32
@@ -87,6 +102,7 @@ void PagedFile::ReadPage(PageId page, std::span<std::byte> dst) {
 
 void PagedFile::WritePage(PageId page, std::span<const std::byte> src) {
   if (src.size() < page_size_) throw std::invalid_argument("page buffer smaller than page size");
+  CheckBufferAlignment(src, mode_);
 
   const uint64_t offset = page * page_size_;
 #ifdef _WIN32

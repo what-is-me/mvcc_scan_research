@@ -14,6 +14,7 @@
 #include "buffer/frame.h"
 #include "storage/page_file.h"
 #include "buffer/pool_hooks.h"
+#include "common/aligned_buffer.h"
 #include "common/fixed_array.h"
 #include "storage/page.h"
 #include "storage/table_layout.h"
@@ -174,7 +175,7 @@ class BufferPool {
   PoolHooks hooks_;
   FixedArray<Frame> frames_;
   FixedArray<std::mutex> row_locks_;
-  FixedArray<std::byte> page_data_;
+  AlignedBuffer page_data_;
   std::vector<size_t> free_;
   mutable std::mutex mutex_;
   std::condition_variable cv_;

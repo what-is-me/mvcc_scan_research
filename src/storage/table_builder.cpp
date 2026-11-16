@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "common/fixed_array.h"
+#include "common/aligned_buffer.h"
 #include "storage/page.h"
 #include "storage/paged_file.h"
 
@@ -27,11 +27,11 @@ uint64_t RowDataWord(size_t linear_row, size_t word_index) {
              static_cast<uint64_t>(word_index) * 0xBF58476D1CE4E5B9ull);
 }
 
-void BuildBaseFile(const std::filesystem::path& path, const TableLayout& layout) {
+void BuildBaseFile(const std::filesystem::path& path, const TableLayout& layout, IoMode mode) {
   RemoveFileIfExists(path);
 
-  PagedFile file(path, layout.page_size());
-  FixedArray<std::byte> buffer(layout.page_size());
+  PagedFile file(path, layout.page_size(), mode);
+  AlignedBuffer buffer(layout.page_size());
   std::fill(buffer.span().begin(), buffer.span().end(), std::byte{0});
 
   const size_t words_per_row = layout.data_size() / sizeof(uint64_t);

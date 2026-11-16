@@ -5,6 +5,7 @@
 #include <span>
 
 #include "common/basic_types.h"
+#include "common/io_mode.h"
 #include "storage/page_file.h"
 
 namespace mvcc {
@@ -16,9 +17,13 @@ void RemoveFileIfExists(const std::filesystem::path& path);
 // 定位读写实现：Windows 用带 OVERLAPPED 偏移的 ReadFile/WriteFile，
 // 其他平台用 pread/pwrite。偏移随每次调用传入，既不读也不改文件指针，
 // 所以多个线程可以对同一对象并发读写不同页。
+//
+// IoMode::kDirect 时绕过系统页缓存，页大小必须是扇区大小的整数倍，
+// 传入的缓冲区地址也必须扇区对齐（池与建表缓冲都由 AlignedBuffer 提供）。
 class PagedFile final : public PageFile {
  public:
-  PagedFile(const std::filesystem::path& path, size_t page_size);
+  PagedFile(const std::filesystem::path& path, size_t page_size,
+            IoMode mode = IoMode::kBuffered);
   ~PagedFile() override;
 
   PagedFile(const PagedFile&) = delete;
@@ -34,6 +39,7 @@ class PagedFile final : public PageFile {
  private:
   std::filesystem::path path_;
   size_t page_size_ = 0;
+  IoMode mode_ = IoMode::kBuffered;
 #ifdef _WIN32
   void* handle_ = nullptr;
 #else

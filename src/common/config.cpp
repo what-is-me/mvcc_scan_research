@@ -66,6 +66,11 @@ constexpr EnumEntry<Replacer> kReplacerEntries[] = {
     {"lru_k", Replacer::kLruK},
 };
 
+constexpr EnumEntry<IoMode> kIoModeEntries[] = {
+    {"buffered", IoMode::kBuffered},
+    {"direct", IoMode::kDirect},
+};
+
 template <typename E, size_t N>
 bool ParseEnum(const EnumEntry<E> (&entries)[N], std::string_view text, E* out) {
   for (const EnumEntry<E>& entry : entries) {
@@ -92,6 +97,7 @@ const char* ToString(KeyMapping value) { return EnumName(kKeyMappingEntries, val
 const char* ToString(ScanAccessMode value) { return EnumName(kScanAccessModeEntries, value); }
 const char* ToString(ScanPolicy value) { return EnumName(kScanPolicyEntries, value); }
 const char* ToString(Replacer value) { return EnumName(kReplacerEntries, value); }
+const char* ToString(IoMode value) { return EnumName(kIoModeEntries, value); }
 
 bool Config::Set(std::string_view key, std::string_view value, std::string* error) {
   const auto invalid = [&](std::string_view expected) {
@@ -110,6 +116,10 @@ bool Config::Set(std::string_view key, std::string_view value, std::string* erro
   }
   if (key == "table_rows") {
     if (!ParseSize(value, &table_rows)) return invalid("integer");
+    return true;
+  }
+  if (key == "io_mode") {
+    if (!ParseEnum(kIoModeEntries, value, &io_mode)) return invalid("buffered | direct");
     return true;
   }
   if (key == "base_pool_mb") {
@@ -187,6 +197,9 @@ std::string Config::Validate() const {
   const size_t page_bytes = page_size_kb * 1024;
   if (row_size_b > page_bytes) return "row_size_b must not exceed page size";
   if (page_bytes / row_size_b > kMaxRowsPerPage) return "too many rows per page for a 16-bit slot";
+  if (io_mode == IoMode::kDirect && page_bytes % kSectorBytes != 0) {
+    return "page_size_kb must be a multiple of 4 when io_mode is direct";
+  }
 
   if (base_pool_mb == 0) return "base_pool_mb must be positive";
   if (undo_pool_mb == 0) return "undo_pool_mb must be positive";
@@ -212,6 +225,7 @@ std::string Config::Describe() const {
   std::string text = "page_size_kb=" + std::to_string(page_size_kb);
   text += " row_size_b=" + std::to_string(row_size_b);
   text += " table_rows=" + std::to_string(table_rows);
+  text += " io_mode=" + std::string(ToString(io_mode));
   text += " base_pool_mb=" + std::to_string(base_pool_mb);
   text += " undo_pool_mb=" + std::to_string(undo_pool_mb);
   text += " undo_capacity_gb=" + std::to_string(undo_capacity_gb);

@@ -5,6 +5,8 @@
 #include <string_view>
 #include <vector>
 
+#include "common/io_mode.h"
+
 namespace mvcc {
 
 enum class KeyDist { kUniform, kZipf05, kZipf08, kZipf11 };
@@ -18,11 +20,13 @@ const char* ToString(KeyMapping value);
 const char* ToString(ScanAccessMode value);
 const char* ToString(ScanPolicy value);
 const char* ToString(Replacer value);
+const char* ToString(IoMode value);
 
 struct Config {
   size_t page_size_kb = 64;
   size_t row_size_b = 128;
   size_t table_rows = 2'000'000;
+  IoMode io_mode = IoMode::kDirect;
 
   size_t base_pool_mb = 128;
   size_t undo_pool_mb = 64;
@@ -34,7 +38,7 @@ struct Config {
   size_t rows_per_txn = 1;
 
   ScanPolicy scan_policy = ScanPolicy::kBaseline;
-  size_t scan_interval_ms = 200;
+  size_t scan_interval_ms = 1000;
   ScanAccessMode scan_access_mode = ScanAccessMode::kScan;
 
   Replacer replacer = Replacer::kLru;
