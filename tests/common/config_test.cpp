@@ -29,7 +29,7 @@ class TempConfigFile {
 
 TEST(Config, DefaultsMatchDocumentedValues) {
   const Config config;
-  EXPECT_EQ(config.page_size_kb, 8u);
+  EXPECT_EQ(config.page_size_kb, 64u);
   EXPECT_EQ(config.row_size_b, 128u);
   EXPECT_EQ(config.table_rows, 2'000'000u);
   EXPECT_EQ(config.base_pool_mb, 128u);
@@ -40,7 +40,7 @@ TEST(Config, DefaultsMatchDocumentedValues) {
   EXPECT_EQ(config.key_mapping, KeyMapping::kScattered);
   EXPECT_EQ(config.rows_per_txn, 1u);
   EXPECT_EQ(config.scan_policy, ScanPolicy::kBaseline);
-  EXPECT_EQ(config.scan_interval_ms, 100u);
+  EXPECT_EQ(config.scan_interval_ms, 200u);
   EXPECT_EQ(config.scan_access_mode, ScanAccessMode::kScan);
   EXPECT_EQ(config.replacer, Replacer::kLru);
   EXPECT_EQ(config.duration_s, 60u);
@@ -198,7 +198,7 @@ TEST(Config, WarnsWhenPoolCoversWholeTable) {
 
 TEST(Config, DescribeListsEveryParameter) {
   const std::string text = Config().Describe();
-  EXPECT_NE(text.find("page_size_kb=8"), std::string::npos);
+  EXPECT_NE(text.find("page_size_kb=64"), std::string::npos);
   EXPECT_NE(text.find("key_dist=zipf0.8"), std::string::npos);
   EXPECT_NE(text.find("scan_policy=baseline"), std::string::npos);
   EXPECT_NE(text.find("replacer=lru"), std::string::npos);

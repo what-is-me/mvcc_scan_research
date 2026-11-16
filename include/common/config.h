@@ -20,7 +20,7 @@ const char* ToString(ScanPolicy value);
 const char* ToString(Replacer value);
 
 struct Config {
-  size_t page_size_kb = 8;
+  size_t page_size_kb = 64;
   size_t row_size_b = 128;
   size_t table_rows = 2'000'000;
 
@@ -34,7 +34,7 @@ struct Config {
   size_t rows_per_txn = 1;
 
   ScanPolicy scan_policy = ScanPolicy::kBaseline;
-  size_t scan_interval_ms = 100;
+  size_t scan_interval_ms = 200;
   ScanAccessMode scan_access_mode = ScanAccessMode::kScan;
 
   Replacer replacer = Replacer::kLru;
