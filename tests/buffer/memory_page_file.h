@@ -10,11 +10,16 @@
 
 namespace mvcc::test {
 
-// 每页以页号开头、其余填页号低字节，供并发测试校验读到的页身份。
+enum class PageFill {
+  kPageId,  // 每页以页号开头、其余填页号低字节，供并发测试校验读到的页身份
+  kZero,    // 全零，模拟按真实建表规则初始化过的基表
+};
+
 class MemoryPageFile : public PageFile {
  public:
-  MemoryPageFile(size_t page_count, size_t page_size)
+  MemoryPageFile(size_t page_count, size_t page_size, PageFill fill = PageFill::kPageId)
       : page_size_(page_size), data_(page_count * page_size, std::byte{0}) {
+    if (fill == PageFill::kZero) return;
     for (size_t page = 0; page < page_count; ++page) {
       std::byte* base = data_.data() + page * page_size_;
       std::memset(base, static_cast<int>(page & 0xFF), page_size_);
