@@ -16,6 +16,7 @@
 
 #include "buffer/frame.h"
 #include "buffer/page_table.h"
+#include "buffer/pool_concepts.h"
 #include "buffer/pool_hooks.h"
 #include "common/aligned_buffer.h"
 #include "common/fixed_array.h"
@@ -41,7 +42,7 @@ struct PoolStats {
   }
 };
 
-template <typename Mapping, typename Replacer>
+template <PageMapping Mapping, FrameReplacer Replacer>
 class BufferPool {
  public:
   // prefetch_pages 为 0 表示不预取（undo 池不需要顺序预取）。
@@ -233,6 +234,19 @@ class BufferPool {
         return false;
       }
     }
+
+    // 空闲帧必须是干净的：复用路径依赖这一点，否则上一页的脏标志会被带到新页。
+    for (const size_t index : free_) {
+      const Frame& frame = frames_[index];
+      if (frame.state.load(std::memory_order_relaxed) != FrameState::kFree) {
+        *error = "frame " + std::to_string(index) + " is in the free list but not free";
+        return false;
+      }
+      if (frame.dirty.load(std::memory_order_relaxed)) {
+        *error = "free frame " + std::to_string(index) + " is still dirty";
+        return false;
+      }
+    }
     return true;
   }
 
@@ -252,6 +266,7 @@ class BufferPool {
     if (!free_.empty()) {
       const size_t index = free_.back();
       free_.pop_back();
+      assert(frames_[index].dirty.load(std::memory_order_relaxed) == false);
       table_.Insert(page, index);
       frames_[index].page_id = page;
       frames_[index].state.store(FrameState::kLoading, std::memory_order_relaxed);
@@ -279,8 +294,10 @@ class BufferPool {
     table_.Erase(victim_page);
 
     // 写回期间别的线程可能已经把这一页装进来了；此时放弃淘汰，帧退还空闲表，
-    // 否则同一页会关联两个帧，帧内行锁互斥随之失效（IN2）。
+    // 否则同一页会关联两个帧，帧内行锁互斥随之失效（IN2）。脏标志必须在这里
+    // 清掉：内容已落盘，而空闲帧的"dirty 为假"是复用路径的前提。
     if (table_.Find(page)) {
+      victim_frame.dirty.store(false, std::memory_order_relaxed);
       victim_frame.state.store(FrameState::kFree, std::memory_order_relaxed);
       free_.push_back(*victim);
       cv_.notify_all();
@@ -300,6 +317,7 @@ class BufferPool {
       const std::lock_guard<std::mutex> lock(mutex_);
       for (const size_t index : reserved) {
         table_.Erase(frames_[index].page_id);
+        frames_[index].dirty.store(false, std::memory_order_relaxed);
         frames_[index].state.store(FrameState::kFree, std::memory_order_relaxed);
         free_.push_back(index);
       }

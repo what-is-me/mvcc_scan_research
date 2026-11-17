@@ -2,6 +2,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <span>
 
 #include <gtest/gtest.h>
@@ -45,7 +46,35 @@ TEST(RowLayout, WritesAndReadsHeaderFields) {
   EXPECT_TRUE(row.version().locked());
   EXPECT_EQ(row.version().timestamp(), Timestamp{7});
   EXPECT_EQ(row.undo_row_id(), RowId::Make(3, 9));
-  EXPECT_EQ(row.header().undo_row_id.slot(), SlotId{9});
+}
+
+TEST(RowLayout, HeaderWordsSitAtFixedOffsets) {
+  AlignedPageBuffer buffer;
+  Row row(RowSpan(buffer, 128));
+
+  row.set_version(VersionStamp::Committed(7).WithLock());
+  row.set_undo_row_id(RowId::Make(3, 9));
+
+  uint64_t version_word = 0;
+  uint64_t undo_word = 0;
+  std::memcpy(&version_word, buffer.bytes.data() + kVersionOffset, sizeof(version_word));
+  std::memcpy(&undo_word, buffer.bytes.data() + kUndoRowIdOffset, sizeof(undo_word));
+
+  EXPECT_EQ(version_word, VersionStamp::Committed(7).WithLock().raw());
+  EXPECT_EQ(undo_word, RowId::Make(3, 9).raw());
+}
+
+TEST(RowLayout, HeaderFieldsAreIndependentWords) {
+  AlignedPageBuffer buffer;
+  Row row(RowSpan(buffer, 128));
+
+  row.set_version(VersionStamp::Committed(7));
+  row.set_undo_row_id(RowId::Make(3, 9));
+  row.set_undo_row_id(RowId::Make(5, 1));
+  EXPECT_EQ(row.version(), VersionStamp::Committed(7));
+
+  row.set_version(VersionStamp::Committed(8).WithLock());
+  EXPECT_EQ(row.undo_row_id(), RowId::Make(5, 1));
 }
 
 TEST(RowLayout, DataAreaStartsRightAfterHeader) {
@@ -95,8 +124,7 @@ TEST(PageLayout, RowsSitAtSlotTimesRowSize) {
   Page page(PageSpan(buffer, layout), layout);
 
   for (size_t slot = 0; slot < 5; ++slot) {
-    EXPECT_EQ(reinterpret_cast<std::byte*>(&page.RowAt(slot).header()),
-              buffer.bytes.data() + slot * layout.row_size());
+    EXPECT_EQ(page.RowAt(slot).bytes().data(), buffer.bytes.data() + slot * layout.row_size());
   }
 }
 
@@ -106,7 +134,8 @@ TEST(PageLayout, KeepsEveryRowHeaderEightByteAligned) {
   Page page(PageSpan(buffer, layout), layout);
 
   for (size_t slot = 0; slot < page.row_count(); ++slot) {
-    const auto address = reinterpret_cast<std::uintptr_t>(&page.RowAt(slot).header());
+    const auto address =
+        reinterpret_cast<std::uintptr_t>(page.RowAt(slot).bytes().data());
     EXPECT_EQ(address % 8, 0u);
   }
 }

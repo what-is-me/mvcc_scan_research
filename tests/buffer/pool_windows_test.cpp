@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <future>
+#include <string>
 #include <thread>
 
 #include <gtest/gtest.h>
@@ -156,7 +157,13 @@ TEST(PoolWindows, ConcurrentFixOfEvictedPageLoadsOnce) {
   Gate gate(PoolHookPoint::kBeforeWriteBack);
   Pool pool = MakePool(layout, 2, file, gate.hooks());
 
-  pool.Unpin(pool.Fix(0, AccessMode::kNormal));
+  // 页 0 标脏，这样被淘汰时会真的走一次写回；放弃淘汰后它退回空闲表，
+  // 脏标志必须随之清零，否则会被带到下一个装入的页。
+  constexpr uint64_t kMarker = 0xDEADBEEF12345678ull;
+  Frame* page0 = pool.Fix(0, AccessMode::kNormal);
+  std::memcpy(page0->data.data(), &kMarker, sizeof(kMarker));
+  pool.MarkDirty(page0);
+  pool.Unpin(page0);
   pool.Unpin(pool.Fix(1, AccessMode::kNormal));
   const size_t reads_before = file.reads.load();
 
@@ -177,6 +184,9 @@ TEST(PoolWindows, ConcurrentFixOfEvictedPageLoadsOnce) {
 
   pool.Unpin(first);
   pool.Unpin(second);
+
+  std::string error;
+  EXPECT_TRUE(pool.CheckInvariants(&error)) << error;
 }
 
 }  // namespace mvcc

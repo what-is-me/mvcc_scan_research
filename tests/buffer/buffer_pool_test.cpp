@@ -10,12 +10,17 @@
 #include "buffer/buffer_pool.h"
 #include "buffer/lru_replacer.h"
 #include "buffer/page_table.h"
+#include "buffer/pool_concepts.h"
 #include "memory_page_file.h"
 #include "storage/page.h"
 #include "storage/table_layout.h"
 
 namespace mvcc {
 namespace {
+
+static_assert(PageMapping<DirectPageTable>);
+static_assert(PageMapping<FrameHashTable>);
+static_assert(FrameReplacer<LruReplacer>);
 
 constexpr size_t kPageSize = 4096;
 constexpr size_t kRowSize = 128;
