@@ -25,6 +25,13 @@ class MemoryPageFile : public PageFile {
   void ReadPage(PageId page, std::span<std::byte> dst) override {
     std::memcpy(dst.data(), data_.data() + page * page_size_, page_size_);
     reads.fetch_add(1, std::memory_order_relaxed);
+    read_ops.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void ReadPages(PageId first, size_t count, std::span<std::byte> dst) override {
+    std::memcpy(dst.data(), data_.data() + first * page_size_, count * page_size_);
+    reads.fetch_add(count, std::memory_order_relaxed);
+    read_ops.fetch_add(1, std::memory_order_relaxed);
   }
 
   void WritePage(PageId page, std::span<const std::byte> src) override {
@@ -32,9 +39,12 @@ class MemoryPageFile : public PageFile {
     writes.fetch_add(1, std::memory_order_relaxed);
   }
 
+  size_t page_size() const override { return page_size_; }
+
   std::span<std::byte> Page(PageId page) { return {data_.data() + page * page_size_, page_size_}; }
 
   std::atomic<size_t> reads{0};
+  std::atomic<size_t> read_ops{0};
   std::atomic<size_t> writes{0};
 
  private:

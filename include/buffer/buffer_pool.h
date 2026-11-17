@@ -1,10 +1,12 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -12,18 +14,24 @@
 #include <vector>
 
 #include "buffer/frame.h"
-#include "storage/page_file.h"
+#include "buffer/page_table.h"
 #include "buffer/pool_hooks.h"
 #include "common/aligned_buffer.h"
 #include "common/fixed_array.h"
 #include "storage/page.h"
+#include "storage/page_file.h"
 #include "storage/table_layout.h"
 
 namespace mvcc {
 
+// 基表池的默认预取深度：一次读 16 页（64 KB 页下为 1 MB）。实测再加深收益递减，
+// 而单次读的范围越大，批内已驻留页造成的浪费也越多。
+inline constexpr size_t kDefaultPrefetchPages = 16;
+
 struct PoolStats {
   uint64_t logical_reads = 0;
-  uint64_t physical_reads = 0;
+  uint64_t physical_reads = 0;      // 从设备读入的页数（预取一批计 count 页）
+  uint64_t physical_read_ops = 0;  // 实际发起的读调用次数
   uint64_t physical_writes = 0;
 
   double hit_rate() const {
@@ -35,17 +43,20 @@ struct PoolStats {
 template <typename Mapping, typename Replacer>
 class BufferPool {
  public:
+  // prefetch_pages 为 0 表示不预取（undo 池不需要顺序预取）。
   BufferPool(const TableLayout& layout, size_t frame_count, PageFile& file, RowLockMode lock_mode,
-             Mapping mapping, Replacer replacer, PoolHooks hooks = {})
+             Mapping mapping, Replacer replacer, PoolHooks hooks = {}, size_t prefetch_pages = 0)
       : layout_(layout),
         frame_count_(frame_count),
+        prefetch_pages_(prefetch_pages),
         file_(file),
         table_(std::move(mapping)),
         replacer_(std::move(replacer)),
         hooks_(hooks),
         frames_(frame_count),
         row_locks_(lock_mode == RowLockMode::kAllocate ? frame_count * layout.rows_per_page() : 0),
-        page_data_(frame_count * layout.page_size()) {
+        page_data_(frame_count * layout.page_size()),
+        prefetch_buffer_(prefetch_pages * layout.page_size()) {
     for (size_t index = 0; index < frame_count_; ++index) {
       frames_[index].data =
           page_data_.span().subspan(index * layout_.page_size(), layout_.page_size());
@@ -74,42 +85,17 @@ class BufferPool {
         continue;
       }
 
-      if (!free_.empty()) {
-        const size_t index = free_.back();
-        free_.pop_back();
-        table_.Insert(page, index);
-        frames_[index].state.store(FrameState::kLoading, std::memory_order_relaxed);
-        lock.unlock();
-        return LoadInto(index, page, mode);
-      }
-
-      const std::optional<size_t> victim = replacer_.SelectVictim(frames_.span());
-      if (!victim) {
-        cv_.wait(lock, [this] { return replacer_.SelectVictim(frames_.span()).has_value(); });
+      const std::optional<size_t> reserved = ReserveFrame(page, lock);
+      if (!reserved) {
+        if (table_.Find(page)) continue;
+        cv_.wait(lock, [this] {
+          return !free_.empty() || replacer_.SelectVictim(frames_.span()).has_value();
+        });
         continue;
       }
 
-      Frame& victim_frame = frames_[*victim];
-      assert(victim_frame.pin.load(std::memory_order_relaxed) == 0);
-      victim_frame.state.store(FrameState::kEvicting, std::memory_order_relaxed);
-      replacer_.OnEvict(*victim);
-      const PageId victim_page = victim_frame.page_id;
-      const bool was_dirty = victim_frame.dirty.load(std::memory_order_acquire);
       lock.unlock();
-
-      hooks_.Fire(PoolHookPoint::kBeforeWriteBack);
-      if (was_dirty) {
-        file_.WritePage(victim_page, victim_frame.data);
-        physical_writes_.fetch_add(1, std::memory_order_relaxed);
-      }
-
-      lock.lock();
-      table_.Erase(victim_page);
-      table_.Insert(page, *victim);
-      victim_frame.state.store(FrameState::kLoading, std::memory_order_relaxed);
-      lock.unlock();
-
-      return LoadInto(*victim, page, mode);
+      return LoadInto(*reserved, page, mode);
     }
   }
 
@@ -124,6 +110,59 @@ class BufferPool {
     if (became_idle) cv_.notify_all();
   }
 
+  // 预取 [first, first+count) 的连续页：一次定位读装整批，把每页的往返延迟
+  // 摊到 count 页上。只是提示——已驻留或在途的页跳过，装进来的页不 pin，
+  // 可能在真正访问前被淘汰。返回实际装入的页数。只允许单个线程调用。
+  size_t Prefetch(PageId first, size_t count, AccessMode mode) {
+    if (prefetch_pages_ == 0) return 0;
+    if (first >= layout_.page_count()) return 0;
+    count = std::min(count, static_cast<size_t>(layout_.page_count() - first));
+    count = std::min(count, prefetch_pages_);
+    if (count == 0) return 0;
+
+    const std::lock_guard<std::mutex> serialise(prefetch_mutex_);
+
+    std::vector<size_t> reserved;
+    reserved.reserve(count);
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      for (size_t offset = 0; offset < count; ++offset) {
+        if (const std::optional<size_t> index = ReserveFrame(first + offset, lock)) {
+          reserved.push_back(*index);
+        }
+      }
+    }
+    if (reserved.empty()) return 0;
+
+    const std::span<std::byte> staging = prefetch_buffer_.span().first(count * layout_.page_size());
+    try {
+      hooks_.Fire(PoolHookPoint::kBeforeFileRead);
+      file_.ReadPages(first, count, staging);
+      hooks_.Fire(PoolHookPoint::kAfterFileRead);
+    } catch (...) {
+      ReleaseReserved(reserved);
+      throw;
+    }
+
+    physical_reads_.fetch_add(count, std::memory_order_relaxed);
+    physical_read_ops_.fetch_add(1, std::memory_order_relaxed);
+
+    {
+      const std::lock_guard<std::mutex> lock(mutex_);
+      for (const size_t index : reserved) {
+        Frame& frame = frames_[index];
+        const size_t offset = (frame.page_id - first) * layout_.page_size();
+        std::memcpy(frame.data.data(), staging.data() + offset, layout_.page_size());
+        frame.dirty.store(false, std::memory_order_relaxed);
+        frame.pin.store(0, std::memory_order_relaxed);
+        frame.state.store(FrameState::kResident, std::memory_order_release);
+        replacer_.OnLoad(index, mode);
+      }
+    }
+    cv_.notify_all();
+    return reserved.size();
+  }
+
   void MarkDirty(Frame* frame) { frame->dirty.store(true, std::memory_order_release); }
 
   Page View(Frame* frame) const { return Page(frame->data, layout_); }
@@ -131,6 +170,7 @@ class BufferPool {
   PoolStats stats() const {
     return PoolStats{logical_reads_.load(std::memory_order_relaxed),
                      physical_reads_.load(std::memory_order_relaxed),
+                     physical_read_ops_.load(std::memory_order_relaxed),
                      physical_writes_.load(std::memory_order_relaxed)};
   }
 
@@ -148,12 +188,77 @@ class BufferPool {
     return frames_[*index].state.load(std::memory_order_relaxed) != FrameState::kResident;
   }
 
+  // 在锁内为缺页的页占一个帧并写进页表，返回时帧处于 Loading，调用方负责装载。
+  // 淘汰需要写回时会中途放开锁；返回 nullopt 表示该页已被别人装入，或暂时
+  // 没有可淘汰的帧——两种情况都由调用方重新判断。
+  std::optional<size_t> ReserveFrame(PageId page, std::unique_lock<std::mutex>& lock) {
+    if (table_.Find(page)) return std::nullopt;
+
+    if (!free_.empty()) {
+      const size_t index = free_.back();
+      free_.pop_back();
+      table_.Insert(page, index);
+      frames_[index].page_id = page;
+      frames_[index].state.store(FrameState::kLoading, std::memory_order_relaxed);
+      return index;
+    }
+
+    const std::optional<size_t> victim = replacer_.SelectVictim(frames_.span());
+    if (!victim) return std::nullopt;
+
+    Frame& victim_frame = frames_[*victim];
+    assert(victim_frame.pin.load(std::memory_order_relaxed) == 0);
+    victim_frame.state.store(FrameState::kEvicting, std::memory_order_relaxed);
+    replacer_.OnEvict(*victim);
+    const PageId victim_page = victim_frame.page_id;
+    const bool was_dirty = victim_frame.dirty.load(std::memory_order_acquire);
+    lock.unlock();
+
+    hooks_.Fire(PoolHookPoint::kBeforeWriteBack);
+    if (was_dirty) {
+      file_.WritePage(victim_page, victim_frame.data);
+      physical_writes_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    lock.lock();
+    table_.Erase(victim_page);
+
+    // 写回期间别的线程可能已经把这一页装进来了；此时放弃淘汰，帧退还空闲表，
+    // 否则同一页会关联两个帧，帧内行锁互斥随之失效（IN2）。
+    if (table_.Find(page)) {
+      victim_frame.state.store(FrameState::kFree, std::memory_order_relaxed);
+      free_.push_back(*victim);
+      cv_.notify_all();
+      return std::nullopt;
+    }
+
+    table_.Insert(page, *victim);
+    victim_frame.page_id = page;
+    victim_frame.dirty.store(false, std::memory_order_relaxed);
+    victim_frame.pin.store(0, std::memory_order_relaxed);
+    victim_frame.state.store(FrameState::kLoading, std::memory_order_relaxed);
+    return *victim;
+  }
+
+  void ReleaseReserved(const std::vector<size_t>& reserved) {
+    {
+      const std::lock_guard<std::mutex> lock(mutex_);
+      for (const size_t index : reserved) {
+        table_.Erase(frames_[index].page_id);
+        frames_[index].state.store(FrameState::kFree, std::memory_order_relaxed);
+        free_.push_back(index);
+      }
+    }
+    cv_.notify_all();
+  }
+
   Frame* LoadInto(size_t index, PageId page, AccessMode mode) {
     Frame& frame = frames_[index];
     hooks_.Fire(PoolHookPoint::kBeforeFileRead);
     file_.ReadPage(page, frame.data);
     hooks_.Fire(PoolHookPoint::kAfterFileRead);
     physical_reads_.fetch_add(1, std::memory_order_relaxed);
+    physical_read_ops_.fetch_add(1, std::memory_order_relaxed);
 
     {
       const std::lock_guard<std::mutex> lock(mutex_);
@@ -169,6 +274,7 @@ class BufferPool {
 
   const TableLayout& layout_;
   size_t frame_count_;
+  size_t prefetch_pages_;
   PageFile& file_;
   Mapping table_;
   Replacer replacer_;
@@ -176,11 +282,14 @@ class BufferPool {
   FixedArray<Frame> frames_;
   FixedArray<std::mutex> row_locks_;
   AlignedBuffer page_data_;
+  AlignedBuffer prefetch_buffer_;
   std::vector<size_t> free_;
   mutable std::mutex mutex_;
+  std::mutex prefetch_mutex_;
   std::condition_variable cv_;
   std::atomic<uint64_t> logical_reads_{0};
   std::atomic<uint64_t> physical_reads_{0};
+  std::atomic<uint64_t> physical_read_ops_{0};
   std::atomic<uint64_t> physical_writes_{0};
 };
 

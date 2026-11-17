@@ -150,4 +150,33 @@ TEST(PoolWindows, ReaderWaitsForWriteBackThenSeesNewContent) {
   EXPECT_EQ(file.writes.load(), 1u);
 }
 
+TEST(PoolWindows, ConcurrentFixOfEvictedPageLoadsOnce) {
+  const TableLayout layout = TestLayout();
+  test::MemoryPageFile file(layout.page_count(), layout.page_size());
+  Gate gate(PoolHookPoint::kBeforeWriteBack);
+  Pool pool = MakePool(layout, 2, file, gate.hooks());
+
+  pool.Unpin(pool.Fix(0, AccessMode::kNormal));
+  pool.Unpin(pool.Fix(1, AccessMode::kNormal));
+  const size_t reads_before = file.reads.load();
+
+  Frame* first = nullptr;
+  std::thread load_a([&pool, &first] { first = pool.Fix(5, AccessMode::kNormal); });
+  ASSERT_TRUE(gate.WaitUntilBlocked());
+
+  Frame* second = nullptr;
+  std::thread load_b([&pool, &second] { second = pool.Fix(5, AccessMode::kNormal); });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  gate.Release();
+  load_a.join();
+  load_b.join();
+
+  EXPECT_EQ(file.reads.load() - reads_before, 1u);
+  EXPECT_EQ(first, second);
+
+  pool.Unpin(first);
+  pool.Unpin(second);
+}
+
 }  // namespace mvcc

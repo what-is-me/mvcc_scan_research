@@ -193,10 +193,32 @@ static 可变状态。组件间除稳定关系（如 Scanner 持有 Table 引用
 - **淘汰路径**置"淘汰中"的同时摘除候选资格，因此写回期间不会被第二个
   线程再次选中；页表条目保留到写回完成之后才清除（IN4）；同一页的读者
   在此期间等待而不是重装。
+- **淘汰路径必须二次校验**：写回在锁外进行，重取锁后要先查目标页是否
+  已被别的线程装入；若是则放弃本次淘汰、把帧退还空闲表，由调用方回到
+  循环重新判断。漏掉这一步，同一页会先后关联两个帧——两个 `locks[slot]`
+  是两把不同的锁，互斥静默失效（违反 IN2）。
 - **唤醒不会丢失**：pin 落到 0 在锁内完成，等待方在锁内重检谓词；通知
   可以发在锁外，因为状态改变本身发生在锁内。
 - **pin 与状态转移全部在锁内**，故无需 CAS；原子性只用于锁外可读的
   `dirty` 与统计计数。
+
+### 7.5 预取：按批装载
+
+扫描的页序完全可预测，因此允许在池内按批装载，把单页的设备往返延迟摊到
+整批上。这就是本系统唯一的预取机制，不引入异步 I/O 或后台线程。
+
+- `Prefetch(first, count)`：一次定位读把连续 count 页读进池内暂存区，再按
+  页分发到各自帧后发布为驻留。只由扫描线程调用，一批一次。
+- **只是提示**：已驻留或在途的页跳过；装进来的页**不 pin**，真正访问时若
+  已被淘汰就按缺页重新装载。因此预取不影响任何正确性不变式。
+- 批内若夹着已驻留页，整批仍会被完整读一遍——这是为了保持一次连续读而
+  接受的浪费，批越小浪费越小。
+- 深度取 16 页（64 KB 页下 1 MB）。实测同一张基表扫描 3907 页：不预取
+  390 ms / 3907 次读调用，预取后 158 ms / 245 次调用；深度加到 32、64 只
+  再快 19% 与 26%，而单批浪费随深度上升。
+- **物理读按页计，另单独统计读调用次数**：一次批量读记 count 页物理读与
+  1 次读调用。只有把两者分开，才能看出预取摊薄了多少次设备往返。
+- undo 池不预取：版本链遍历不是顺序访问，批内命中率太低。
 
 ## 8. 时间戳管理
 
@@ -378,11 +400,12 @@ read_ts 的历史节点永远不会被触碰。扫描对某行实际遍历的跳
 **I/O 一律绕过系统页缓存**（Windows 为 FILE_FLAG_NO_BUFFERING，POSIX 为
 O_DIRECT）：缓冲池是唯一的页缓存，若让系统页缓存再兜一层，缓冲池未命中就
 退化成一次内存拷贝，命中率与替换策略的差异会被抹平，实验失去意义。代价是
-每次未命中都是真实设备读：本机实测 64 KB 页、3907 页，一次全表扫描约
-390 ms（约 99 µs/页），故扫描间隔取 1000 ms，占空比约 39%。由此也要求
-页大小为扇区大小（4096 B）的整数倍，页缓冲按扇区对齐。**间隔是相邻两次
-扫描起始时刻之差**，不是"结束后再等"。换机器或换存储介质后应重测这两个
-常数再定。
+每次未命中都是真实设备读：本机实测 64 KB 页、3907 页，逐页装载时一次全表
+扫描约 390 ms（约 99 µs/页），按批预取（§7.5，深度 16 页）后约 158 ms。
+扫描间隔取 1000 ms，占空比约 16%——等扫描策略落地、版本解析成本可测之后
+再按实测收紧。由此也要求页大小为扇区大小（4096 B）的整数倍，页缓冲按扇区
+对齐。**间隔是相邻两次扫描起始时刻之差**，不是"结束后再等"。换机器或换
+存储介质后应重测这几个常数再定。
 
 页大小取 64 KB 而非更常见的 8 KB：无缓冲 I/O 下每次读都要付一次设备延迟，
 8 KB 页会让一次扫描的读次数翻 8 倍（31250 次），扫描彻底被 I/O 主导，
@@ -426,8 +449,10 @@ O_DIRECT）：缓冲池是唯一的页缓存，若让系统页缓存再兜一层
 实验矩阵 = 扫描策略 4 配置 × 替换策略 5 种。每次实验采集：
 
 - 扫描端到端延迟（分主扫描与版本解析两段计时）；
-- 基表池 / undo 池各自的逻辑读、物理读（I/O 次数）、命中率；
+- 基表池 / undo 池各自的逻辑读、物理读、读调用次数、命中率；
   文件以无缓冲方式打开，物理读就是真实设备读，两个池的数字可直接比较。
+  物理读按**页**计，读调用次数按**次**计：预取把 count 页合成一次读，
+  两个数的比值就是预取的摊销倍数（§7.5）。
 - 扫描期间 TP 吞吐与延迟（对照无扫描基线的退化幅度）；
 - 写冲突率；
 - **链均跳数**：扫描过程中对走链行数与总跳数顺带计数（均值 = 总跳数 /
@@ -451,8 +476,9 @@ O_DIRECT）：缓冲池是唯一的页缓存，若让系统页缓存再兜一层
   key_mapping, rows_per_txn, scan_interval_ms, scan_access_mode,
   duration_s, scan_count, scan_latency_ms_p50, scan_latency_ms_p99,
   main_scan_ms_p50, resolve_ms_p50, base_logical_reads,
-  base_physical_reads, base_hit_rate, undo_logical_reads,
-  undo_physical_reads, undo_hit_rate, tp_throughput_txn_per_s,
+  base_physical_reads, base_physical_read_ops, base_hit_rate,
+  undo_logical_reads, undo_physical_reads, undo_physical_read_ops,
+  undo_hit_rate, tp_throughput_txn_per_s,
   tp_latency_ms_p50, tp_latency_ms_p99, write_conflict_rate,
   undo_file_mb_end, chain_avg_hops
 
@@ -465,7 +491,8 @@ O_DIRECT）：缓冲池是唯一的页缓存，若让系统页缓存再兜一层
 details[]（数组，最后一个字段；元素按 scan_seq 升序，自 1 起）：
   scan_seq, start_time_s, main_scan_ms, resolve_ms, chain_rows,
   chain_hops, base_logical_reads, base_physical_reads,
-  undo_logical_reads, undo_physical_reads
+  base_physical_read_ops, undo_logical_reads, undo_physical_reads,
+  undo_physical_read_ops
   （start_time_s 自实验开始计；chain_rows / chain_hops 为该次扫描的
   走链行数与总跳数；四个 *_reads 为该次扫描的增量计数）
 ~~~
@@ -476,7 +503,7 @@ details[]（数组，最后一个字段；元素按 scan_seq 升序，自 1 起�
 2. buffer pool + LRU + 两种页表映射（基表直接映射、undo 哈希）；池框架单测。
 3. TimestampManager：先串行验证 min 语义，再加并发。
 4. Transaction / TxnContext：更新、提交、回滚；单线程 oracle 通过。
-5. baseline 扫描：串行对照正确。
+5. baseline 扫描：按批预取（§7.5），串行对照正确。
 6. TP 多线程负载（Zipf + 置换表）：TSan 通过、终态 oracle 通过。
 7. 中途扫描校验（小规模）通过。
 8. 其余四种替换策略。

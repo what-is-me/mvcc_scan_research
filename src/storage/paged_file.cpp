@@ -96,6 +96,34 @@ void PagedFile::ReadPage(PageId page, std::span<std::byte> dst) {
 #endif
 }
 
+void PagedFile::ReadPages(PageId first, size_t count, std::span<std::byte> dst) {
+  if (count == 0) return;
+  const size_t bytes = count * page_size_;
+  if (dst.size() < bytes) throw std::invalid_argument("buffer smaller than requested range");
+  CheckBufferAlignment(dst);
+
+  const uint64_t offset = first * page_size_;
+#ifdef _WIN32
+  OVERLAPPED overlapped{};
+  overlapped.Offset = static_cast<DWORD>(offset & 0xFFFFFFFFull);
+  overlapped.OffsetHigh = static_cast<DWORD>(offset >> 32);
+  const DWORD expected = static_cast<DWORD>(bytes);
+  DWORD read = 0;
+  if (::ReadFile(static_cast<HANDLE>(handle_), dst.data(), expected, &read, &overlapped) == 0 ||
+      read != expected) {
+    ThrowIoError("cannot read pages from " + std::to_string(first), path_);
+  }
+#else
+  size_t done = 0;
+  while (done < bytes) {
+    const ssize_t got =
+        ::pread(fd_, dst.data() + done, bytes - done, static_cast<off_t>(offset + done));
+    if (got <= 0) ThrowIoError("cannot read pages from " + std::to_string(first), path_);
+    done += static_cast<size_t>(got);
+  }
+#endif
+}
+
 void PagedFile::WritePage(PageId page, std::span<const std::byte> src) {
   if (src.size() < page_size_) throw std::invalid_argument("page buffer smaller than page size");
   CheckBufferAlignment(src);

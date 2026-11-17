@@ -31,8 +31,9 @@ class PagedFile final : public PageFile {
 
   void ReadPage(PageId page, std::span<std::byte> dst) override;
   void WritePage(PageId page, std::span<const std::byte> src) override;
+  void ReadPages(PageId first, size_t count, std::span<std::byte> dst) override;
 
-  size_t page_size() const { return page_size_; }
+  size_t page_size() const override { return page_size_; }
   // 文件当前页数的快照；有并发写入时结果只是某一瞬间的值，仅在写入停止后有意义。
   size_t size_in_pages() const;
 
