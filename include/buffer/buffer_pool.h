@@ -70,35 +70,13 @@ class BufferPool {
     }
   }
 
-  Frame* Fix(PageId page, AccessMode mode) {
-    logical_reads_.fetch_add(1, std::memory_order_relaxed);
+  Frame* Fix(PageId page, AccessMode mode) { return FixImpl(page, mode, LoadSource::kFile); }
 
-    for (;;) {
-      std::unique_lock<std::mutex> lock(mutex_);
-
-      if (const std::optional<size_t> index = table_.Find(page)) {
-        Frame& frame = frames_[*index];
-        if (frame.state.load(std::memory_order_relaxed) == FrameState::kResident) {
-          frame.pin.fetch_add(1, std::memory_order_relaxed);
-          replacer_.OnHit(*index, mode);
-          return &frame;
-        }
-        cv_.wait(lock, [this, page] { return !InFlight(page); });
-        continue;
-      }
-
-      const std::optional<size_t> reserved = ReserveFrame(page, lock);
-      if (!reserved) {
-        if (table_.Find(page)) continue;
-        cv_.wait(lock, [this] {
-          return !free_.empty() || replacer_.SelectVictim(frames_.span()).has_value();
-        });
-        continue;
-      }
-
-      lock.unlock();
-      return LoadInto(*reserved, page, mode);
-    }
+  // 装入一个"逻辑上存在、但从未落盘"的页：内容全零，不发设备读。undo 文件是
+  // 空文件、只追加，新分配的页在第一次写回之前根本不在文件里，读它会直接
+  // 报 EOF，所以第一条记录写入前必须走这里。
+  Frame* FixEmpty(PageId page, AccessMode mode) {
+    return FixImpl(page, mode, LoadSource::kZeroFill);
   }
 
   void Unpin(Frame* frame) {
@@ -251,6 +229,39 @@ class BufferPool {
   }
 
  private:
+  enum class LoadSource { kFile, kZeroFill };
+
+  Frame* FixImpl(PageId page, AccessMode mode, LoadSource source) {
+    logical_reads_.fetch_add(1, std::memory_order_relaxed);
+
+    for (;;) {
+      std::unique_lock<std::mutex> lock(mutex_);
+
+      if (const std::optional<size_t> index = table_.Find(page)) {
+        Frame& frame = frames_[*index];
+        if (frame.state.load(std::memory_order_relaxed) == FrameState::kResident) {
+          frame.pin.fetch_add(1, std::memory_order_relaxed);
+          replacer_.OnHit(*index, mode);
+          return &frame;
+        }
+        cv_.wait(lock, [this, page] { return !InFlight(page); });
+        continue;
+      }
+
+      const std::optional<size_t> reserved = ReserveFrame(page, lock);
+      if (!reserved) {
+        if (table_.Find(page)) continue;
+        cv_.wait(lock, [this] {
+          return !free_.empty() || replacer_.SelectVictim(frames_.span()).has_value();
+        });
+        continue;
+      }
+
+      lock.unlock();
+      return LoadInto(*reserved, page, mode, source);
+    }
+  }
+
   bool InFlight(PageId page) const {
     const std::optional<size_t> index = table_.Find(page);
     if (!index) return false;
@@ -325,13 +336,17 @@ class BufferPool {
     cv_.notify_all();
   }
 
-  Frame* LoadInto(size_t index, PageId page, AccessMode mode) {
+  Frame* LoadInto(size_t index, PageId page, AccessMode mode, LoadSource source) {
     Frame& frame = frames_[index];
-    hooks_.Fire(PoolHookPoint::kBeforeFileRead);
-    file_.ReadPage(page, frame.data);
-    hooks_.Fire(PoolHookPoint::kAfterFileRead);
-    physical_reads_.fetch_add(1, std::memory_order_relaxed);
-    physical_read_ops_.fetch_add(1, std::memory_order_relaxed);
+    if (source == LoadSource::kFile) {
+      hooks_.Fire(PoolHookPoint::kBeforeFileRead);
+      file_.ReadPage(page, frame.data);
+      hooks_.Fire(PoolHookPoint::kAfterFileRead);
+      physical_reads_.fetch_add(1, std::memory_order_relaxed);
+      physical_read_ops_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      std::memset(frame.data.data(), 0, frame.data.size());
+    }
 
     {
       const std::lock_guard<std::mutex> lock(mutex_);
