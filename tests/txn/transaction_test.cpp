@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -212,6 +213,55 @@ TEST(Transaction, ReportsWriteSetFull) {
   EXPECT_EQ(txn.Update(RowId::Make(8, static_cast<SlotId>(kRowsPerTxn)), data),
             UpdateOutcome::kWriteSetFull);
   txn.Abort();
+}
+
+// 每个线程只碰自己那一组行，所以不会冲突；这样跑到的是真正并发的更新、
+// 提交与 undo 页换入换出，而不是冲突退避。
+TEST(Transaction, ConcurrentDisjointUpdatesAllLand) {
+  constexpr size_t kThreads = 4;
+  constexpr size_t kIterations = 50;
+
+  Env env;
+  TimestampManager timestamps{kThreads};
+  std::vector<TxnContext> contexts;
+  contexts.reserve(kThreads);
+  for (size_t index = 0; index < kThreads; ++index) {
+    contexts.emplace_back(kRowsPerTxn, env.layout.data_size());
+  }
+
+  auto row_of = [&env](size_t thread, size_t iteration) {
+    const size_t linear = thread * kIterations + iteration;
+    return RowId::Make(linear / env.layout.rows_per_page(),
+                       static_cast<SlotId>(linear % env.layout.rows_per_page()));
+  };
+  auto data_of = [&env](size_t thread, size_t iteration) {
+    return DataWith(static_cast<uint8_t>(thread * kIterations + iteration + 1),
+                    env.layout.data_size());
+  };
+
+  std::vector<std::thread> threads;
+  threads.reserve(kThreads);
+  for (size_t thread = 0; thread < kThreads; ++thread) {
+    threads.emplace_back([&, thread] {
+      UndoAppender appender(env.allocator, env.layout);
+      Txn txn(env.base, env.undo, env.layout, appender, timestamps, thread, contexts[thread]);
+      for (size_t iteration = 0; iteration < kIterations; ++iteration) {
+        txn.Begin();
+        EXPECT_EQ(txn.Update(row_of(thread, iteration), data_of(thread, iteration)),
+                  UpdateOutcome::kApplied);
+        txn.Commit();
+      }
+    });
+  }
+  for (std::thread& thread : threads) thread.join();
+
+  const Timestamp now = timestamps.ReadTimestamp();
+  for (size_t thread = 0; thread < kThreads; ++thread) {
+    for (size_t iteration = 0; iteration < kIterations; ++iteration) {
+      EXPECT_EQ(ReadRow(env, row_of(thread, iteration), now), data_of(thread, iteration))
+          << "thread " << thread << " iteration " << iteration;
+    }
+  }
 }
 
 }  // namespace
