@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -179,6 +180,60 @@ class BufferPool {
   size_t resident_frames() const {
     const std::lock_guard<std::mutex> lock(mutex_);
     return frame_count_ - free_.size();
+  }
+
+  // 机械校验 §7.4 的不变量：页表与帧双向一致、一帧至多被一页引用、
+  // 非驻留帧的 pin 必须为 0。只在测试里调用，生产路径不经过这里。
+  bool CheckInvariants(std::string* error) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+
+    std::vector<size_t> references(frame_count_, 0);
+    size_t entries = 0;
+    bool ok = true;
+
+    table_.ForEach([&](PageId page, size_t index) {
+      if (!ok) return;
+      ++entries;
+      if (index >= frame_count_) {
+        *error = "page table points past frame array";
+        ok = false;
+        return;
+      }
+      if (++references[index] > 1) {
+        *error = "frame " + std::to_string(index) + " is referenced by more than one page";
+        ok = false;
+        return;
+      }
+      const Frame& frame = frames_[index];
+      if (frame.page_id != page) {
+        *error = "frame " + std::to_string(index) + " holds page " +
+                 std::to_string(frame.page_id) + " but is mapped to page " + std::to_string(page);
+        ok = false;
+        return;
+      }
+      if (frame.state.load(std::memory_order_relaxed) == FrameState::kFree) {
+        *error = "page " + std::to_string(page) + " maps to a free frame";
+        ok = false;
+      }
+    });
+    if (!ok) return false;
+
+    if (entries != frame_count_ - free_.size()) {
+      *error = "page table has " + std::to_string(entries) + " entries but " +
+               std::to_string(frame_count_ - free_.size()) + " frames are out of the free list";
+      return false;
+    }
+
+    for (size_t index = 0; index < frame_count_; ++index) {
+      const Frame& frame = frames_[index];
+      const bool resident =
+          frame.state.load(std::memory_order_relaxed) == FrameState::kResident;
+      if (!resident && frame.pin.load(std::memory_order_relaxed) != 0) {
+        *error = "frame " + std::to_string(index) + " is pinned while not resident";
+        return false;
+      }
+    }
+    return true;
   }
 
  private:
