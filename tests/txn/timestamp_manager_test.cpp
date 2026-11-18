@@ -151,6 +151,37 @@ TEST(TimestampManager, ReaderDoesNotWaitForPublishedButUnfinishedCommit) {
   EXPECT_EQ(manager.ReadTimestamp(), Timestamp{1});
 }
 
+TEST(TimestampManager, WaitingReaderWakesAtPublishNotAtRelease) {
+  Gate gate(TimestampHookPoint::kWhileReserved);
+  TimestampManager manager(1, gate.hooks());
+
+  std::promise<void> published;
+  std::future<void> is_published = published.get_future();
+  std::promise<void> finish;
+  std::future<void> finished = finish.get_future();
+
+  std::thread committer([&] {
+    const CommitScope scope(manager, 0);
+    published.set_value();
+    // 故意让槽位停在"进行中"：读者若只在释放时被唤醒，下面的断言会超时。
+    finished.wait();
+  });
+  ASSERT_TRUE(gate.WaitUntilBlocked());
+
+  std::future<Timestamp> reader =
+      std::async(std::launch::async, [&manager] { return manager.ReadTimestamp(); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+  gate.Release();
+  ASSERT_EQ(is_published.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  ASSERT_EQ(reader.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+      << "发布 commit_ts 后必须唤醒等待的读者，不能等到槽位释放";
+  EXPECT_EQ(reader.get(), Timestamp{1});
+
+  finish.set_value();
+  committer.join();
+}
+
 TEST(TimestampManager, MovedScopeKeepsSlotUntilDestruction) {
   TimestampManager manager(1);
 

@@ -61,7 +61,8 @@ class TimestampManager {
   size_t slot_count() const { return slots_.size(); }
 
   // 读快照时间戳。遇到处于预留态的槽位时等待它落定，不跳过：跳过会取到大于
-  // 该提交 commit_ts 的 read_ts，而集合里又没有它，于是看到半个写集。
+  // 该提交 commit_ts 的 read_ts，而集合里又没有它，于是看到半个写集。等待先是
+  // 短自旋，跨过调度边界后交给 atomic::wait，由提交方在发布 commit_ts 时唤醒。
   Timestamp ReadTimestamp() const;
 
   Timestamp counter() const { return counter_.load(std::memory_order_acquire); }

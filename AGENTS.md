@@ -258,6 +258,12 @@ static 可变状态。组件间除稳定关系（如 Scanner 持有 Table 引用
   变为具体值或空闲，不得跳过**——跳过可能取到大于该提交 commit_ts 的
   read_ts，随后看到其写集的一半。预留窗口只有一次计数器自增的长度，
   等待极短。
+- **等待方式：短自旋（64 轮）后 `atomic::wait`，由提交方在发布 commit_ts
+  时 `notify_all` 唤醒。** 不要用固定 sleep 轮询：本机实测 1 ms 睡眠的实际
+  放行延迟是 10 ms 量级，而 wait 是 20 µs。MinGW/libstdc++ 在没有 futex
+  后端时把 wait 退化为 yield 轮询（实测预留期间 CPU 近零、唤醒约 20 µs），
+  Linux 的 futex 与 MSVC 的 WaitOnAddress 则是真正的内核阻塞，两条都比
+  固定睡眠好。
 - **为什么预留必须在取号之前**：若先取号后登记，两步之间存在窗口，读者
   会取到偏大的 read_ts 而集合中又没有该事务，出现撕裂。
 
