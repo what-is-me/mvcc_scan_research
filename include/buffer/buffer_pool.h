@@ -61,7 +61,8 @@ class BufferPool {
         frames_(frame_count),
         row_locks_(lock_mode == RowLockMode::kAllocate ? frame_count * layout.rows_per_page() : 0),
         page_data_(frame_count * layout.page_size()),
-        prefetch_buffer_(prefetch_pages * layout.page_size()) {
+        prefetch_buffer_(prefetch_pages * layout.page_size()),
+        reserved_scratch_(prefetch_pages) {
     for (size_t index = 0; index < frame_count_; ++index) {
       frames_[index].data =
           page_data_.span().subspan(index * layout_.page_size(), layout_.page_size());
@@ -110,17 +111,19 @@ class BufferPool {
 
     const std::lock_guard<std::mutex> serialise(prefetch_mutex_);
 
-    std::vector<size_t> reserved;
-    reserved.reserve(count);
+    // 暂存区与预留表都是池构造时一次性分配的：预取在扫描路径上，每次再申请
+    // 一个 vector 会把分配器拖进热路径。prefetch_mutex_ 保证同一时刻只有一
+    // 个线程用它。
+    size_t reserved_count = 0;
     {
       std::unique_lock<std::mutex> lock(mutex_);
       for (size_t offset = 0; offset < count; ++offset) {
         if (const std::optional<size_t> index = ReserveFrame(first + offset, lock)) {
-          reserved.push_back(*index);
+          reserved_scratch_[reserved_count++] = *index;
         }
       }
     }
-    if (reserved.empty()) return 0;
+    if (reserved_count == 0) return 0;
 
     const std::span<std::byte> staging = prefetch_buffer_.span().first(count * layout_.page_size());
     try {
@@ -128,7 +131,7 @@ class BufferPool {
       file_.ReadPages(first, count, staging);
       hooks_.Fire(PoolHookPoint::kAfterFileRead);
     } catch (...) {
-      ReleaseReserved(reserved);
+      ReleaseReserved(std::span<const size_t>(reserved_scratch_.span().data(), reserved_count));
       throw;
     }
 
@@ -138,12 +141,13 @@ class BufferPool {
     // 预取装入的页就是池没能满足的页请求，同样计入逻辑读与逻辑未命中。否则
     // 开预取之后每次 Fix 都命中，命中率恒为 1，池装不装得下表都看不出来。
     // 只为已驻留页发起的重复设备读只进物理读，不属于页请求。
-    logical_reads_.fetch_add(reserved.size(), std::memory_order_relaxed);
-    logical_misses_.fetch_add(reserved.size(), std::memory_order_relaxed);
+    logical_reads_.fetch_add(reserved_count, std::memory_order_relaxed);
+    logical_misses_.fetch_add(reserved_count, std::memory_order_relaxed);
 
     {
       const std::lock_guard<std::mutex> lock(mutex_);
-      for (const size_t index : reserved) {
+      for (size_t slot = 0; slot < reserved_count; ++slot) {
+        const size_t index = reserved_scratch_[slot];
         Frame& frame = frames_[index];
         const size_t offset = (frame.page_id - first) * layout_.page_size();
         std::memcpy(frame.data.data(), staging.data() + offset, layout_.page_size());
@@ -154,7 +158,7 @@ class BufferPool {
       }
     }
     cv_.notify_all();
-    return reserved.size();
+    return reserved_count;
   }
 
   void MarkDirty(Frame* frame) { frame->dirty.store(true, std::memory_order_release); }
@@ -339,7 +343,7 @@ class BufferPool {
     return *victim;
   }
 
-  void ReleaseReserved(const std::vector<size_t>& reserved) {
+  void ReleaseReserved(std::span<const size_t> reserved) {
     {
       const std::lock_guard<std::mutex> lock(mutex_);
       for (const size_t index : reserved) {
@@ -406,6 +410,7 @@ class BufferPool {
   FixedArray<std::mutex> row_locks_;
   AlignedBuffer page_data_;
   AlignedBuffer prefetch_buffer_;
+  FixedArray<size_t> reserved_scratch_;
   std::vector<size_t> free_;
   mutable std::mutex mutex_;
   std::mutex prefetch_mutex_;

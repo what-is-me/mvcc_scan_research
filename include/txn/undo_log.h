@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <limits>
 #include <span>
 
 #include "buffer/frame.h"
@@ -85,7 +86,7 @@ class UndoAppender {
                          : pool.Fix(page_, AccessMode::kNormal);
 
     const size_t slot = next_slot_++;
-    assert(slot <= static_cast<size_t>(SlotId{-1}));
+    assert(slot <= std::numeric_limits<SlotId>::max());
     const UndoRowId id = UndoRowId::Make(page_, static_cast<SlotId>(slot));
     return UndoReservation<Pool>(pool, frame, Page(frame->data, *layout_).RowAt(slot), id);
   }

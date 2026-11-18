@@ -65,11 +65,13 @@ class Transaction {
   void Begin() {
     context_->Reset();
     context_->set_read_ts(timestamps_->ReadTimestamp());
+    commit_ts_ = 0;
     committed_ = false;
     active_ = true;
   }
 
   Timestamp read_ts() const { return context_->read_ts(); }
+  Timestamp commit_ts() const { return commit_ts_; }
   bool active() const { return active_; }
   const TxnContext& context() const { return *context_; }
 
@@ -124,13 +126,17 @@ class Transaction {
 
     const CommitScope scope(*timestamps_, slot_);
     committed_ = true;
-    const VersionStamp stamp = VersionStamp::Committed(scope.commit_ts());
+    commit_ts_ = scope.commit_ts();
+    const VersionStamp stamp = VersionStamp::Committed(commit_ts_);
 
     // 页面已驻留且被 pin，下面的 Fix 只是命中，不会再读盘，也就不会抛出。
     for (size_t index = 0; index < context_->size(); ++index) {
       RowGuard<BasePool> guard(*base_pool_, *layout_, context_->row_at(index));
-      const std::span<const std::byte> data = context_->data_at(index);
-      std::copy(data.begin(), data.end(), guard.row().data().begin());
+      // 写集里的每一行从更新那一刻起就由本事务置锁，直到这里写回 commit_ts。
+      // 锁位若已不在，说明有人越过了冲突检查改过这一行，此时覆盖会永久抹掉
+      // 对方已提交的版本（读者回溯时直接跳过它）。
+      assert(guard.row().version().locked());
+      guard.row().CopyDataFrom(context_->data_at(index));
       guard.row().set_version(stamp);
       guard.MarkDirty();
     }
@@ -147,6 +153,7 @@ class Transaction {
     for (size_t index = 0; index < context_->size(); ++index) {
       RowGuard<BasePool> guard(*base_pool_, *layout_, context_->row_at(index));
       const VersionStamp current = guard.row().version();
+      assert(current.locked());
       if (current.locked()) guard.row().set_version(current.WithoutLock());
       guard.MarkDirty();
     }
@@ -180,6 +187,7 @@ class Transaction {
   size_t slot_;
   TxnContext* context_;
   FixedArray<Frame*> pinned_;
+  Timestamp commit_ts_ = 0;
   bool active_ = false;
   bool committed_ = false;
 };

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <span>
@@ -27,8 +27,10 @@ void ReadVisible(BasePool& base_pool, UndoPool& undo_pool, const TableLayout& la
     Frame* frame = base_pool.Fix(id.page(), mode);
     const Row row = Page(frame->data, layout).RowAt(id.slot());
 
-    std::copy(row.data().begin(), row.data().end(), out.begin());
+    row.CopyDataTo(out);
     cursor = row.undo_row_id();
+    // 与扫描器相同：数据读完之后放 acquire 栅栏，再读版本戳。
+    std::atomic_thread_fence(std::memory_order_acquire);
     const VersionStamp stamp = row.version();
 
     if (!stamp.locked() && stamp.timestamp() < read_ts) {
@@ -45,7 +47,7 @@ void ReadVisible(BasePool& base_pool, UndoPool& undo_pool, const TableLayout& la
     Frame* frame = undo_pool.Fix(cursor.page(), AccessMode::kNormal);
     const Row record = Page(frame->data, layout).RowAt(cursor.slot());
     if (record.version().timestamp() < read_ts) {
-      std::copy(record.data().begin(), record.data().end(), out.begin());
+      record.CopyDataTo(out);
       undo_pool.Unpin(frame);
       return;
     }

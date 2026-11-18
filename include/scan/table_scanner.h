@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cassert>
 #include <cstddef>
@@ -27,34 +28,27 @@ struct ScanResult {
   PoolStats undo_stats;
 };
 
-// 把一段行数据折叠成一个 64 位值。只用于跨实现比对：XOR 可交换，所以整表
-// 的期望值可以按行独立算出再合并，不依赖扫描顺序，也不受补齐行影响。
-inline uint64_t ChecksumBytes(std::span<const std::byte> bytes) {
-  const auto load = [bytes](size_t offset) {
-    uint64_t word = 0;
-    std::memcpy(&word, bytes.data() + offset, sizeof(word));
-    return word;
-  };
+namespace scan_detail {
 
+// 四个累加器打散依赖链：逐字串行 XOR 会卡在每字一拍的延迟上。
+template <typename LoadWord>
+inline uint64_t FoldWords(size_t word_count, LoadWord load) {
   uint64_t a = 0;
   uint64_t b = 0;
   uint64_t c = 0;
   uint64_t d = 0;
-  size_t offset = 0;
-  const size_t limit = bytes.size() & ~size_t{7};
+  size_t index = 0;
 
-  for (; offset + 32 <= limit; offset += 32) {
-    a ^= load(offset);
-    b ^= load(offset + 8);
-    c ^= load(offset + 16);
-    d ^= load(offset + 24);
+  for (; index + 4 <= word_count; index += 4) {
+    a ^= load(index);
+    b ^= load(index + 1);
+    c ^= load(index + 2);
+    d ^= load(index + 3);
   }
-  for (; offset < limit; offset += 8) a ^= load(offset);
+  for (; index < word_count; ++index) a ^= load(index);
 
   return a ^ std::rotl(b, 17) ^ std::rotl(c, 31) ^ std::rotl(d, 47);
 }
-
-namespace scan_detail {
 
 inline PoolStats StatsDelta(const PoolStats& after, const PoolStats& before) {
   return PoolStats{after.logical_reads - before.logical_reads,
@@ -65,6 +59,22 @@ inline PoolStats StatsDelta(const PoolStats& after, const PoolStats& before) {
 }
 
 }  // namespace scan_detail
+
+// 折叠一段字节。只用于跨实现比对：XOR 可交换，所以整表的期望值可以按行
+// 独立算出再合并，不依赖扫描顺序，也不受补齐行影响。
+inline uint64_t ChecksumBytes(std::span<const std::byte> bytes) {
+  return scan_detail::FoldWords(bytes.size() / sizeof(uint64_t), [bytes](size_t index) {
+    uint64_t word = 0;
+    std::memcpy(&word, bytes.data() + index * sizeof(uint64_t), sizeof(word));
+    return word;
+  });
+}
+
+// 行数据同样按字折叠，但走 Row 的原子访问：扫描与提交可能同时进行。
+inline uint64_t ChecksumRow(const Row& row) {
+  return scan_detail::FoldWords(row.data_words(),
+                                [&row](size_t index) { return row.data_word(index); });
+}
 
 // 全表扫描的基线策略：按页号升序逐页扫，需要旧版本时立即沿 undo 链回溯。
 // 页按批预取，一次 Fix 覆盖整页的行——逐行 Fix 会给每行再加一次池锁往返，
@@ -113,8 +123,11 @@ class TableScanner {
   // 做，不先拷进缓冲——拷一份和折叠一样是"在版本戳之前读完数据"，但少一次
   // 每行上百字节的内存拷贝。
   void ScanRow(Row row, Timestamp read_ts, ScanResult& result) {
-    const uint64_t fold = ChecksumBytes(row.data());
+    const uint64_t fold = ChecksumRow(row);
     UndoRowId cursor = row.undo_row_id();
+    // 数据读完之后、版本戳之前：这道 acquire 栅栏挡住"数据读被重排到版本戳
+    // 之后"，否则可能拿旧凭证配新数据（I1 的顺序不能只靠版本戳的 acquire）。
+    std::atomic_thread_fence(std::memory_order_acquire);
     const VersionStamp stamp = row.version();
     ++result.rows;
 
@@ -133,7 +146,7 @@ class TableScanner {
       ++result.chain_hops;
 
       if (record.version().timestamp() < read_ts) {
-        result.checksum ^= ChecksumBytes(record.data());
+        result.checksum ^= ChecksumRow(record);
         undo_pool_->Unpin(frame);
         return;
       }

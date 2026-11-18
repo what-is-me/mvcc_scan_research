@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <mutex>
+#include <span>
 
 #include "buffer/frame.h"
 #include "common/basic_types.h"
@@ -21,16 +22,13 @@ class RowGuard {
  public:
   RowGuard(Pool& pool, const TableLayout& layout, RowId id,
            AccessMode mode = AccessMode::kNormal)
-      : pool_(&pool),
-        id_(id),
-        frame_(pool.Fix(id.page(), mode)),
-        lock_(&LockOf(frame_, id.slot())),
-        row_(Page(frame_->data, layout).RowAt(id.slot())) {
+      : pool_(&pool), id_(id), frame_(pool.Fix(id.page(), mode)), lock_(&LockOf(frame_, id.slot())) {
+    // 构造没有完成就不会走析构，所以取行视图与上锁都在 try 里面：任何一步抛出
+    // 都要先把 pin 还回去，否则这一帧永远 pin > 0，再也选不成牺牲帧。
     try {
+      row_bytes_ = Page(frame_->data, layout).RowAt(id.slot()).bytes();
       lock_->lock();
     } catch (...) {
-      // 构造没有完成就不会走析构，已拿到的 pin 必须在这里还回去，否则这一帧
-      // 永远 pin > 0，再也选不成牺牲帧。
       pool_->Unpin(frame_);
       throw;
     }
@@ -46,7 +44,7 @@ class RowGuard {
   RowGuard(RowGuard&&) = delete;
   RowGuard& operator=(RowGuard&&) = delete;
 
-  Row row() const { return row_; }
+  Row row() const { return Row(row_bytes_); }
   RowId id() const { return id_; }
   Frame* frame() const { return frame_; }
 
@@ -64,7 +62,7 @@ class RowGuard {
   RowId id_;
   Frame* frame_;
   std::mutex* lock_;
-  Row row_;
+  std::span<std::byte> row_bytes_;
 };
 
 }  // namespace mvcc
