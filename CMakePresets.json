@@ -27,6 +27,16 @@
       }
     },
     {
+      "name": "mingw-debug",
+      "inherits": "mingw",
+      "displayName": "MinGW GCC 16 Debug (Ninja)",
+      "description": "断言开启；目录固定为 build/_dbg，反复增量复用，不必每次重建",
+      "binaryDir": "${sourceDir}/build/_dbg",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
       "name": "msvc",
       "inherits": "base",
       "displayName": "MSVC 19.5x (Ninja)",
@@ -61,12 +71,14 @@
   ],
   "buildPresets": [
     { "name": "mingw", "configurePreset": "mingw" },
+    { "name": "mingw-debug", "configurePreset": "mingw-debug" },
     { "name": "msvc", "configurePreset": "msvc" },
     { "name": "clang", "configurePreset": "clang" },
     { "name": "tsan", "configurePreset": "tsan" }
   ],
   "testPresets": [
     { "name": "mingw", "configurePreset": "mingw", "output": { "outputOnFailure": true } },
+    { "name": "mingw-debug", "configurePreset": "mingw-debug", "output": { "outputOnFailure": true } },
     { "name": "msvc", "configurePreset": "msvc", "output": { "outputOnFailure": true } },
     { "name": "clang", "configurePreset": "clang", "output": { "outputOnFailure": true } },
     { "name": "tsan", "configurePreset": "tsan", "output": { "outputOnFailure": true } }
