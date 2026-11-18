@@ -103,9 +103,9 @@ TEST(TpWorkload, TerminalStateMatchesReplayOracle) {
   }
 }
 
-// 排名到行号是双射，两种映射的行级冲突率统计上相同；差别在页级局部性：
-// 头部集中把热门前 1% 压进几页，散布模式把它们摊到上百页。§11 因此默认
-// scattered——否则热点页会被反复淘汰，实验测的是 I/O 而不是并发协议。
+// 排名到行号是双射，两种映射的行级冲突率统计上相同；差别在页级分布：
+// head 把前 1% 压进几页，这些页常驻，物理读明显更少。§11 默认 scattered
+// 是为了让热点页由页内热点行密度自然涌现，而不是被映射人为压缩。
 TEST(TpWorkload, HeadMappingTouchesFewerPages) {
   const auto run = [](KeyMapping mapping) {
     Env env;
