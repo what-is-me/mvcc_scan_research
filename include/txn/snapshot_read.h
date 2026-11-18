@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cstddef>
@@ -17,6 +18,9 @@ namespace mvcc {
 // 顺序是协议的一部分：数据 -> undo_row_id -> 版本戳。版本戳是"读到的内容是否
 // 有效"的凭证，必须最后读；判定成立后还要重读 undo_row_id，因为首次读到的
 // 可能还是写者更新链头之前的旧值（I2）。
+//
+// 这次拷贝与提交并发时可能是写者改到一半的中间态——它是有意的乐观读，判定
+// 失败即整份丢弃、改走版本链，不会返回给调用方（I7）。
 template <typename BasePool, typename UndoPool>
 void ReadVisible(BasePool& base_pool, UndoPool& undo_pool, const TableLayout& layout, RowId id,
                  Timestamp read_ts, AccessMode mode, std::span<std::byte> out) {
@@ -27,7 +31,7 @@ void ReadVisible(BasePool& base_pool, UndoPool& undo_pool, const TableLayout& la
     Frame* frame = base_pool.Fix(id.page(), mode);
     const Row row = Page(frame->data, layout).RowAt(id.slot());
 
-    row.CopyDataTo(out);
+    std::copy(row.data().begin(), row.data().end(), out.begin());
     cursor = row.undo_row_id();
     // 与扫描器相同：数据读完之后放 acquire 栅栏，再读版本戳。
     std::atomic_thread_fence(std::memory_order_acquire);
@@ -47,7 +51,7 @@ void ReadVisible(BasePool& base_pool, UndoPool& undo_pool, const TableLayout& la
     Frame* frame = undo_pool.Fix(cursor.page(), AccessMode::kNormal);
     const Row record = Page(frame->data, layout).RowAt(cursor.slot());
     if (record.version().timestamp() < read_ts) {
-      record.CopyDataTo(out);
+      std::copy(record.data().begin(), record.data().end(), out.begin());
       undo_pool.Unpin(frame);
       return;
     }

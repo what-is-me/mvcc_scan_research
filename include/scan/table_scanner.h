@@ -70,12 +70,6 @@ inline uint64_t ChecksumBytes(std::span<const std::byte> bytes) {
   });
 }
 
-// 行数据同样按字折叠，但走 Row 的原子访问：扫描与提交可能同时进行。
-inline uint64_t ChecksumRow(const Row& row) {
-  return scan_detail::FoldWords(row.data_words(),
-                                [&row](size_t index) { return row.data_word(index); });
-}
-
 // 全表扫描的基线策略：按页号升序逐页扫，需要旧版本时立即沿 undo 链回溯。
 // 页按批预取，一次 Fix 覆盖整页的行——逐行 Fix 会给每行再加一次池锁往返，
 // 把行级成本埋掉。
@@ -121,9 +115,10 @@ class TableScanner {
  private:
   // §9.2：数据先读，版本戳最后读；判定成立后重读链头再回溯。折叠直接在行上
   // 做，不先拷进缓冲——拷一份和折叠一样是"在版本戳之前读完数据"，但少一次
-  // 每行上百字节的内存拷贝。
+  // 每行上百字节的内存拷贝。这次折叠可能是写者改到一半的中间态，判定失败时
+  // 整个 fold 被丢弃，不会计入 checksum（I7）。
   void ScanRow(Row row, Timestamp read_ts, ScanResult& result) {
-    const uint64_t fold = ChecksumRow(row);
+    const uint64_t fold = ChecksumBytes(row.data());
     UndoRowId cursor = row.undo_row_id();
     // 数据读完之后、版本戳之前：这道 acquire 栅栏挡住"数据读被重排到版本戳
     // 之后"，否则可能拿旧凭证配新数据（I1 的顺序不能只靠版本戳的 acquire）。
@@ -146,7 +141,7 @@ class TableScanner {
       ++result.chain_hops;
 
       if (record.version().timestamp() < read_ts) {
-        result.checksum ^= ChecksumRow(record);
+        result.checksum ^= ChecksumBytes(record.data());
         undo_pool_->Unpin(frame);
         return;
       }

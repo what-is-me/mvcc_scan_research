@@ -136,7 +136,8 @@ class Transaction {
       // 锁位若已不在，说明有人越过了冲突检查改过这一行，此时覆盖会永久抹掉
       // 对方已提交的版本（读者回溯时直接跳过它）。
       assert(guard.row().version().locked());
-      guard.row().CopyDataFrom(context_->data_at(index));
+      const std::span<const std::byte> fresh = context_->data_at(index);
+      std::copy(fresh.begin(), fresh.end(), guard.row().data().begin());
       guard.row().set_version(stamp);
       guard.MarkDirty();
     }
