@@ -11,6 +11,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -186,12 +187,21 @@ class BufferPool {
     const std::lock_guard<std::mutex> lock(mutex_);
 
     std::vector<size_t> references(frame_count_, 0);
+    // 同一页号在表里出现两次（挂到两个不同帧）时，两个帧各被引用一次，
+    // references 都是 1，单看它查不出来；必须按页号去重。
+    std::unordered_set<PageId> pages;
+    pages.reserve(frame_count_);
     size_t entries = 0;
     bool ok = true;
 
     table_.ForEach([&](PageId page, size_t index) {
       if (!ok) return;
       ++entries;
+      if (!pages.insert(page).second) {
+        *error = "page " + std::to_string(page) + " appears more than once in the page table";
+        ok = false;
+        return;
+      }
       if (index >= frame_count_) {
         *error = "page table points past frame array";
         ok = false;

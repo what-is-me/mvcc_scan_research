@@ -39,6 +39,13 @@ class MemoryPageFile : public PageFile {
   }
 
   void ReadPages(PageId first, size_t count, std::span<std::byte> dst) override {
+    // 批量读也要能注入失败：预取的中途失败会走 ReleaseReserved，那条路径
+    // 只有从整批里挑一页弄坏才测得到。
+    const int64_t failed = fail_page.load(std::memory_order_relaxed);
+    if (failed >= 0 && static_cast<size_t>(failed) >= first &&
+        static_cast<size_t>(failed) < first + count) {
+      throw std::runtime_error("injected batch read failure");
+    }
     std::memcpy(dst.data(), data_.data() + first * page_size_, count * page_size_);
     reads.fetch_add(count, std::memory_order_relaxed);
     read_ops.fetch_add(1, std::memory_order_relaxed);

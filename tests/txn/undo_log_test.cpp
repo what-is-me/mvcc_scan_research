@@ -153,6 +153,31 @@ TEST(UndoAppender, EvictedPageIsWrittenBackAndReadableAgain) {
   pool.Unpin(reloaded);
 }
 
+TEST(UndoAppender, UnwrittenFreshPageIsWrittenBackOnEviction) {
+  const TableLayout layout = TestLayout();
+  test::MemoryPageFile file(kFilePages, layout.page_size());
+  UndoPool pool = MakePool(layout, 2, file);
+  UndoPageAllocator allocator;
+  UndoAppender appender(allocator, layout);
+
+  // 首条记录因写冲突被放弃：槽位已推进，但整页一条记录都没写过。
+  {
+    auto reservation = appender.Reserve(pool);
+    EXPECT_EQ(reservation.id().page(), PageId{0});
+  }
+
+  // 两帧都被别的页占满，page 0 是最久未用的牺牲者。
+  pool.Unpin(pool.Fix(100, AccessMode::kNormal));
+  pool.Unpin(pool.Fix(101, AccessMode::kNormal));
+
+  // 它必须已经落盘。否则文件里根本没有这一页，下一次 Reserve 读它会撞上文件尾。
+  EXPECT_EQ(file.writes.load(), 1u);
+
+  Frame* reloaded = pool.Fix(0, AccessMode::kNormal);
+  EXPECT_EQ(Page(reloaded->data, layout).RowAt(0).undo_row_id(), RowId{});
+  pool.Unpin(reloaded);
+}
+
 TEST(UndoAppender, ConcurrentAppendersUseDistinctIds) {
   const TableLayout layout = TestLayout();
   test::MemoryPageFile file(kFilePages, layout.page_size());

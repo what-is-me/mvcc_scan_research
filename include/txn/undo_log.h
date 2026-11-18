@@ -85,6 +85,12 @@ class UndoAppender {
     Frame* frame = fresh ? pool.FixEmpty(page_, AccessMode::kNormal)
                          : pool.Fix(page_, AccessMode::kNormal);
 
+    // 新分配的页在文件里还不存在。FixEmpty 只零填充内存帧；若这一页的首条
+    // 记录因写冲突被放弃，帧会一直是干净的，淘汰时不写回，文件里就永远缺这
+    // 一页——下次 Fix 同一页会读到文件尾，或读到被后续页撑开的零区。分配即
+    // 标脏，保证它在淘汰时落盘。
+    if (fresh) pool.MarkDirty(frame);
+
     const size_t slot = next_slot_++;
     assert(slot <= std::numeric_limits<SlotId>::max());
     const UndoRowId id = UndoRowId::Make(page_, static_cast<SlotId>(slot));

@@ -1,5 +1,7 @@
 #include <cstddef>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 
 #include <gtest/gtest.h>
 
@@ -59,6 +61,25 @@ TEST(Prefetch, ClampsAtTableEnd) {
 
   EXPECT_EQ(pool.Prefetch(layout.page_count() - 2, kPrefetchPages, AccessMode::kScan), 2u);
   EXPECT_EQ(pool.Prefetch(layout.page_count(), kPrefetchPages, AccessMode::kScan), 0u);
+}
+
+TEST(Prefetch, BatchReadFailureReleasesReservedFrames) {
+  const TableLayout layout(kPageSize, kRowSize, kTableRows);
+  test::MemoryPageFile file(layout.page_count(), layout.page_size());
+  Pool pool = MakePool(layout, file, kPrefetchPages);
+
+  file.fail_page.store(3);
+  EXPECT_THROW(pool.Prefetch(0, kPrefetchPages, AccessMode::kScan), std::runtime_error);
+
+  // 整批失败时已占的帧必须全部归还，页表里不能留下指向"载入中"的死条目。
+  std::string error;
+  EXPECT_TRUE(pool.CheckInvariants(&error)) << error;
+  EXPECT_EQ(pool.resident_frames(), 0u);
+
+  // 撤销之后池仍可用：同一批页能重新装入。
+  file.fail_page.store(-1);
+  EXPECT_EQ(pool.Prefetch(0, kPrefetchPages, AccessMode::kScan), kPrefetchPages);
+  EXPECT_TRUE(pool.CheckInvariants(&error)) << error;
 }
 
 TEST(Prefetch, DisabledWhenDepthIsZero) {
