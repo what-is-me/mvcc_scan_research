@@ -2,8 +2,10 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 #include "storage/page_file.h"
@@ -28,6 +30,9 @@ class MemoryPageFile : public PageFile {
   }
 
   void ReadPage(PageId page, std::span<std::byte> dst) override {
+    if (fail_page.load(std::memory_order_relaxed) == static_cast<int64_t>(page)) {
+      throw std::runtime_error("injected read failure");
+    }
     std::memcpy(dst.data(), data_.data() + page * page_size_, page_size_);
     reads.fetch_add(1, std::memory_order_relaxed);
     read_ops.fetch_add(1, std::memory_order_relaxed);
@@ -51,6 +56,9 @@ class MemoryPageFile : public PageFile {
   std::atomic<size_t> reads{0};
   std::atomic<size_t> read_ops{0};
   std::atomic<size_t> writes{0};
+
+  // 读该页即抛异常，用于验证装载失败 / 提交失败不会留下半成品状态。
+  std::atomic<int64_t> fail_page{-1};
 
  private:
   size_t page_size_;

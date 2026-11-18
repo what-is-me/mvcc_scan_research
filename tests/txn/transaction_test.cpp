@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -213,6 +214,50 @@ TEST(Transaction, ReportsWriteSetFull) {
   EXPECT_EQ(txn.Update(RowId::Make(8, static_cast<SlotId>(kRowsPerTxn)), data),
             UpdateOutcome::kWriteSetFull);
   txn.Abort();
+}
+
+// 提交前先把写集涉及的页装入并 pin 住：设备读是唯一真实的失败源，把它挡在
+// 取号之前，失败就等于"什么都没发生"，可以安全回滚而不是留下半个写集。
+TEST(Transaction, FailedPreFaultLeavesNoTrace) {
+  const TableLayout layout(kPageSize, kRowSize, kTableRows);
+  test::MemoryPageFile base_file(layout.page_count(), layout.page_size(), test::PageFill::kZero);
+  test::MemoryPageFile undo_file(kUndoPages, layout.page_size(), test::PageFill::kZero);
+  BasePool base(layout, 1, base_file, RowLockMode::kAllocate, DirectPageTable(layout.page_count()),
+                LruReplacer(1));
+  UndoPool undo(layout, 8, undo_file, RowLockMode::kNone, FrameHashTable(8), LruReplacer(8));
+  UndoPageAllocator allocator;
+  UndoAppender appender(allocator, layout);
+  TimestampManager timestamps(1);
+  TxnContext context(kRowsPerTxn, layout.data_size());
+
+  const RowId row = RowId::Make(9, 0);
+  const std::vector<std::byte> zeros(layout.data_size(), std::byte{0});
+
+  {
+    Txn txn(base, undo, layout, appender, timestamps, 0, context);
+    txn.Begin();
+    ASSERT_EQ(txn.Update(row, DataWith(0x99, layout.data_size())), UpdateOutcome::kApplied);
+
+    // 基表池只有一帧：把页 9 挤出去，让提交的预装入必须重新读盘。
+    base.Unpin(base.Fix(0, AccessMode::kNormal));
+    base_file.fail_page.store(static_cast<int64_t>(row.page()));
+
+    EXPECT_THROW(txn.Commit(), std::runtime_error);
+    base_file.fail_page.store(-1);
+
+    EXPECT_EQ(timestamps.counter(), Timestamp{1}) << "失败发生在取号之前";
+    EXPECT_TRUE(txn.active());
+  }
+
+  {
+    const RowGuard guard(base, layout, row);
+    EXPECT_FALSE(guard.row().version().locked());
+    EXPECT_EQ(guard.row().version().timestamp(), Timestamp{0});
+  }
+
+  std::vector<std::byte> visible(layout.data_size());
+  ReadVisible(base, undo, layout, row, timestamps.ReadTimestamp(), AccessMode::kNormal, visible);
+  EXPECT_EQ(visible, zeros);
 }
 
 // 每个线程只碰自己那一组行，所以不会冲突；这样跑到的是真正并发的更新、

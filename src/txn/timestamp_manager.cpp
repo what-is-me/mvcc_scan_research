@@ -1,9 +1,18 @@
 #include "txn/timestamp_manager.h"
 
 #include <cassert>
+#include <chrono>
 #include <thread>
 
 namespace mvcc {
+
+namespace {
+
+// 连续这么多轮仍看到预留态，就认为持有者被调度出去了，改为短睡。正常情况下
+// 预留窗口只有一次 fetch_add 的长度，第一轮 yield 之后就能继续。
+constexpr int kSpinRoundsBeforeSleep = 64;
+
+}  // namespace
 
 TimestampManager::TimestampManager(size_t slot_count, TimestampHooks hooks)
     : slots_(slot_count), hooks_(hooks) {
@@ -28,6 +37,8 @@ void TimestampManager::EndCommit(size_t slot) {
 }
 
 Timestamp TimestampManager::ReadTimestamp() const {
+  int spins = 0;
+
   for (;;) {
     // 计数器必须先于槽位读：若本次读到的是某次取号的结果，那么该线程的"预留"
     // 写入已经 happens-before 这里的槽位读（取号是 RMW，其 release 侧与这里的
@@ -48,8 +59,12 @@ Timestamp TimestampManager::ReadTimestamp() const {
 
     if (!saw_reserved) return min_seen;
 
-    // 预留窗口只有一次计数器自增的长度；让出 CPU，不空转占满核心。
-    std::this_thread::yield();
+    if (++spins < kSpinRoundsBeforeSleep) {
+      std::this_thread::yield();
+    } else {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      spins = 0;
+    }
   }
 }
 

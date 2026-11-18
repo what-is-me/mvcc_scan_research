@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <exception>
 #include <ostream>
 #include <span>
 
 #include "common/basic_types.h"
+#include "common/fixed_array.h"
 #include "storage/table_layout.h"
 #include "txn/row_guard.h"
 #include "txn/timestamp_manager.h"
@@ -43,10 +45,16 @@ class Transaction {
         appender_(&appender),
         timestamps_(&timestamps),
         slot_(slot),
-        context_(&context) {}
+        context_(&context),
+        pinned_(context.capacity()) {}
 
   ~Transaction() {
-    if (active_) Abort();
+    if (!active_) return;
+    // 取号之后中断会让读者看到半个写集，而本系统没有 WAL、也没有恢复路径
+    // （§2 非目标）。此时唯一安全的处置是不再回滚并终止，而不是静默产出
+    // 错误结果。Commit 已把设备读挡在取号之前，正常路径不会走到这里。
+    if (committed_) std::terminate();
+    Abort();
   }
 
   Transaction(const Transaction&) = delete;
@@ -57,6 +65,7 @@ class Transaction {
   void Begin() {
     context_->Reset();
     context_->set_read_ts(timestamps_->ReadTimestamp());
+    committed_ = false;
     active_ = true;
   }
 
@@ -104,25 +113,37 @@ class Transaction {
   }
 
   // §9.4：先取号并发布，再逐行写数据、写版本戳，最后释放槽位。
+  //
+  // 取号之后就不能再失败。此时一部分行已带 commit_ts，一旦中途抛出，槽位随
+  // 栈展开释放，读者就能拿到大于该 commit_ts 的 read_ts 而看到半个写集——
+  // 正是 §8 的 min 机制要防的撕裂。所以先把写集涉及的页全部装入并 pin 住：
+  // 唯一的真实失败源是缺页时的设备读，把它挡在取号之前，失败时可以安全回滚。
   void Commit() {
     assert(active_);
-    const CommitScope scope(*timestamps_, slot_);
-    const VersionStamp committed = VersionStamp::Committed(scope.commit_ts());
+    PinWriteSetPages();
 
+    const CommitScope scope(*timestamps_, slot_);
+    committed_ = true;
+    const VersionStamp stamp = VersionStamp::Committed(scope.commit_ts());
+
+    // 页面已驻留且被 pin，下面的 Fix 只是命中，不会再读盘，也就不会抛出。
     for (size_t index = 0; index < context_->size(); ++index) {
       RowGuard<BasePool> guard(*base_pool_, *layout_, context_->row_at(index));
       const std::span<const std::byte> data = context_->data_at(index);
       std::copy(data.begin(), data.end(), guard.row().data().begin());
-      guard.row().set_version(committed);
+      guard.row().set_version(stamp);
       guard.MarkDirty();
     }
 
+    UnpinWriteSetPages();
     active_ = false;
+    committed_ = false;
   }
 
   // §9.5：只清锁位，不恢复 undo_row_id——恢复链头会让读者回溯到过老的版本。
   void Abort() {
     assert(active_);
+    assert(!committed_ && "取号之后回滚只会留下半个写集");
     for (size_t index = 0; index < context_->size(); ++index) {
       RowGuard<BasePool> guard(*base_pool_, *layout_, context_->row_at(index));
       const VersionStamp current = guard.row().version();
@@ -133,6 +154,24 @@ class Transaction {
   }
 
  private:
+  // 把写集涉及的页全部装入并 pin 住。可能触发缺页读，也可能等待淘汰；这一步
+  // 失败时什么都没发布，直接抛出即可，析构会照常回滚。
+  void PinWriteSetPages() {
+    size_t pinned = 0;
+    try {
+      for (; pinned < context_->size(); ++pinned) {
+        pinned_[pinned] = base_pool_->Fix(context_->row_at(pinned).page(), AccessMode::kNormal);
+      }
+    } catch (...) {
+      while (pinned > 0) base_pool_->Unpin(pinned_[--pinned]);
+      throw;
+    }
+  }
+
+  void UnpinWriteSetPages() {
+    for (size_t index = 0; index < context_->size(); ++index) base_pool_->Unpin(pinned_[index]);
+  }
+
   BasePool* base_pool_;
   UndoPool* undo_pool_;
   const TableLayout* layout_;
@@ -140,7 +179,9 @@ class Transaction {
   TimestampManager* timestamps_;
   size_t slot_;
   TxnContext* context_;
+  FixedArray<Frame*> pinned_;
   bool active_ = false;
+  bool committed_ = false;
 };
 
 }  // namespace mvcc

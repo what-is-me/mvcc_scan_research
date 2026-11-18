@@ -2,6 +2,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -268,6 +270,24 @@ TEST(BufferPool, ServesConcurrentFixAndEviction) {
 
   EXPECT_FALSE(failed.load());
   EXPECT_GE(pool.stats().physical_reads, 1u);
+}
+
+TEST(BufferPool, FailedLoadReleasesTheFrameInsteadOfWedgingThePage) {
+  const TableLayout layout = TestLayout();
+  test::MemoryPageFile file(layout.page_count(), layout.page_size());
+  Pool pool = MakePool(layout, 2, file);
+
+  file.fail_page.store(static_cast<int64_t>(5));
+  EXPECT_THROW(pool.Fix(5, AccessMode::kNormal), std::runtime_error);
+  file.fail_page.store(-1);
+
+  // 装载失败若留下"载入中"的占位，这一行会永久阻塞；这里必须能正常拿到页。
+  Frame* frame = pool.Fix(5, AccessMode::kNormal);
+  EXPECT_EQ(frame->page_id, PageId{5});
+  pool.Unpin(frame);
+
+  std::string error;
+  EXPECT_TRUE(pool.CheckInvariants(&error)) << error;
 }
 
 }  // namespace mvcc

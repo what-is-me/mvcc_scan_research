@@ -26,7 +26,14 @@ class RowGuard {
         frame_(pool.Fix(id.page(), mode)),
         lock_(&LockOf(frame_, id.slot())),
         row_(Page(frame_->data, layout).RowAt(id.slot())) {
-    lock_->lock();
+    try {
+      lock_->lock();
+    } catch (...) {
+      // 构造没有完成就不会走析构，已拿到的 pin 必须在这里还回去，否则这一帧
+      // 永远 pin > 0，再也选不成牺牲帧。
+      pool_->Unpin(frame_);
+      throw;
+    }
   }
 
   ~RowGuard() {

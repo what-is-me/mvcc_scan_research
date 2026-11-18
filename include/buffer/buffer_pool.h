@@ -32,13 +32,16 @@ inline constexpr size_t kDefaultPrefetchPages = 16;
 
 struct PoolStats {
   uint64_t logical_reads = 0;
+  uint64_t logical_misses = 0;      // Fix 时页不在池里的次数
   uint64_t physical_reads = 0;      // 从设备读入的页数（预取一批计 count 页）
   uint64_t physical_read_ops = 0;  // 实际发起的读调用次数
   uint64_t physical_writes = 0;
 
+  // 命中率只能由逻辑未命中算出。物理读包含预取装入、但可能从未被访问的页，
+  // 一旦用它反推，命中率会算成负数（预取 8 页只访问 4 页时 1 - 8/4 = -1）。
   double hit_rate() const {
     if (logical_reads == 0) return 0.0;
-    return 1.0 - static_cast<double>(physical_reads) / static_cast<double>(logical_reads);
+    return 1.0 - static_cast<double>(logical_misses) / static_cast<double>(logical_reads);
   }
 };
 
@@ -149,6 +152,7 @@ class BufferPool {
 
   PoolStats stats() const {
     return PoolStats{logical_reads_.load(std::memory_order_relaxed),
+                     logical_misses_.load(std::memory_order_relaxed),
                      physical_reads_.load(std::memory_order_relaxed),
                      physical_read_ops_.load(std::memory_order_relaxed),
                      physical_writes_.load(std::memory_order_relaxed)};
@@ -258,6 +262,7 @@ class BufferPool {
       }
 
       lock.unlock();
+      logical_misses_.fetch_add(1, std::memory_order_relaxed);
       return LoadInto(*reserved, page, mode, source);
     }
   }
@@ -336,12 +341,31 @@ class BufferPool {
     cv_.notify_all();
   }
 
+  // 装载中途失败：撤销占位，把帧还给空闲表并唤醒等在这一页上的线程。
+  void AbandonLoad(size_t index, PageId page) {
+    {
+      const std::lock_guard<std::mutex> lock(mutex_);
+      table_.Erase(page);
+      frames_[index].dirty.store(false, std::memory_order_relaxed);
+      frames_[index].state.store(FrameState::kFree, std::memory_order_relaxed);
+      free_.push_back(index);
+    }
+    cv_.notify_all();
+  }
+
   Frame* LoadInto(size_t index, PageId page, AccessMode mode, LoadSource source) {
     Frame& frame = frames_[index];
     if (source == LoadSource::kFile) {
-      hooks_.Fire(PoolHookPoint::kBeforeFileRead);
-      file_.ReadPage(page, frame.data);
-      hooks_.Fire(PoolHookPoint::kAfterFileRead);
+      try {
+        hooks_.Fire(PoolHookPoint::kBeforeFileRead);
+        file_.ReadPage(page, frame.data);
+        hooks_.Fire(PoolHookPoint::kAfterFileRead);
+      } catch (...) {
+        // 装载失败必须把占位还回去，否则该页永远停在"载入中"，之后任何 Fix
+        // 都会挂在它上面等下去。
+        AbandonLoad(index, page);
+        throw;
+      }
       physical_reads_.fetch_add(1, std::memory_order_relaxed);
       physical_read_ops_.fetch_add(1, std::memory_order_relaxed);
     } else {
@@ -376,6 +400,7 @@ class BufferPool {
   std::mutex prefetch_mutex_;
   std::condition_variable cv_;
   std::atomic<uint64_t> logical_reads_{0};
+  std::atomic<uint64_t> logical_misses_{0};
   std::atomic<uint64_t> physical_reads_{0};
   std::atomic<uint64_t> physical_read_ops_{0};
   std::atomic<uint64_t> physical_writes_{0};
