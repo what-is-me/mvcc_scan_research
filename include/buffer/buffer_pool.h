@@ -93,6 +93,11 @@ class BufferPool {
     if (became_idle) cv_.notify_all();
   }
 
+  // 预取深度由池的构造参数决定（暂存区按它一次性分配）。扫描器按这个值成批
+  // 装载，不再各自持有一份深度——两处各配一个值会出现"扫描器以为在预取、
+  // 池其实没开"的静默降级。
+  size_t prefetch_capacity() const { return prefetch_pages_; }
+
   // 预取 [first, first+count) 的连续页：一次定位读装整批，把每页的往返延迟
   // 摊到 count 页上。只是提示——已驻留或在途的页跳过，装进来的页不 pin，
   // 可能在真正访问前被淘汰。返回实际装入的页数。只允许单个线程调用。
@@ -129,6 +134,12 @@ class BufferPool {
 
     physical_reads_.fetch_add(count, std::memory_order_relaxed);
     physical_read_ops_.fetch_add(1, std::memory_order_relaxed);
+
+    // 预取装入的页就是池没能满足的页请求，同样计入逻辑读与逻辑未命中。否则
+    // 开预取之后每次 Fix 都命中，命中率恒为 1，池装不装得下表都看不出来。
+    // 只为已驻留页发起的重复设备读只进物理读，不属于页请求。
+    logical_reads_.fetch_add(reserved.size(), std::memory_order_relaxed);
+    logical_misses_.fetch_add(reserved.size(), std::memory_order_relaxed);
 
     {
       const std::lock_guard<std::mutex> lock(mutex_);

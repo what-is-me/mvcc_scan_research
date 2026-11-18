@@ -73,7 +73,7 @@ TEST(Prefetch, DisabledWhenDepthIsZero) {
 
 // 预取装入、但从未被 Fix 的页会让物理读多于逻辑读；命中率若用物理读反推会
 // 变成负数（1 - 8/4 = -1）。
-TEST(Prefetch, HitRateCountsLogicalMissesNotPrefetchedPages) {
+TEST(Prefetch, PrefetchedLoadsCountAsLogicalMisses) {
   const TableLayout layout(kPageSize, kRowSize, kTableRows);
   test::MemoryPageFile file(layout.page_count(), layout.page_size());
   Pool pool = MakePool(layout, file, kPrefetchPages);
@@ -83,11 +83,13 @@ TEST(Prefetch, HitRateCountsLogicalMissesNotPrefetchedPages) {
     pool.Unpin(pool.Fix(page, AccessMode::kScan));
   }
 
+  // 8 页由预取装入（8 次页请求全部未命中），随后 4 次 Fix 命中。
   const PoolStats stats = pool.stats();
-  EXPECT_EQ(stats.logical_reads, kPrefetchPages / 2);
-  EXPECT_EQ(stats.logical_misses, 0u);
+  EXPECT_EQ(stats.logical_reads, kPrefetchPages + kPrefetchPages / 2);
+  EXPECT_EQ(stats.logical_misses, kPrefetchPages);
   EXPECT_EQ(stats.physical_reads, kPrefetchPages);
-  EXPECT_DOUBLE_EQ(stats.hit_rate(), 1.0);
+  EXPECT_DOUBLE_EQ(stats.hit_rate(), 1.0 - static_cast<double>(kPrefetchPages) /
+                                              static_cast<double>(kPrefetchPages + kPrefetchPages / 2));
 }
 
 TEST(Prefetch, KeepsResidentPagesAndStillReadsBatch) {
