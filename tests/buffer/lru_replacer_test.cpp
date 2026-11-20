@@ -9,7 +9,13 @@
 namespace mvcc {
 namespace {
 
-FixedArray<Frame> MakeFrames(size_t count) { return FixedArray<Frame>(count); }
+FixedArray<Frame> MakeFrames(size_t count) {
+  FixedArray<Frame> frames(count);
+  for (size_t frame = 0; frame < count; ++frame) {
+    frames[frame].state.store(FrameState::kResident, std::memory_order_relaxed);
+  }
+  return frames;
+}
 
 std::optional<size_t> Victim(const LruReplacer& lru, const FixedArray<Frame>& frames) {
   return lru.SelectVictim(PageId{0}, frames.span());

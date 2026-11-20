@@ -11,6 +11,7 @@
 
 #include "buffer/buffer_pool.h"
 #include "buffer/arc_replacer.h"
+#include "buffer/clock_replacer.h"
 #include "buffer/lru_replacer.h"
 #include "buffer/page_table.h"
 #include "buffer/pool_concepts.h"
@@ -335,6 +336,81 @@ TEST(BufferPool, ArcReplacerKeepsInvariantsAcrossEvictions) {
 
   std::string error;
   EXPECT_TRUE(pool.CheckInvariants(&error)) << error;
+}
+
+// Clock 的 SelectVictim 会把热帧降冷，所以它不能当条件变量的谓词：谓词改完
+// 状态返回 false 就睡死在一个再没人通知的等待上（Unpin 的通知已经发过去了，
+// 而那一刻之后没有任何状态变化能再触发唤醒）。这条用例只解固一帧——若谓词
+// 有副作用，工作线程会永远等下去。
+TEST(BufferPool, ClockWaiterWakesOnASingleUnpin) {
+  const TableLayout layout = TestLayout();
+  test::MemoryPageFile file(layout.page_count(), layout.page_size());
+  using ClockPool = BufferPool<DirectPageTable, ClockReplacer>;
+  ClockPool pool(layout, 2, file, RowLockMode::kNone, DirectPageTable(layout.page_count()),
+                 ClockReplacer(2));
+
+  Frame* first = pool.Fix(0, AccessMode::kNormal);
+  Frame* second = pool.Fix(1, AccessMode::kNormal);
+
+  std::atomic<bool> started{false};
+  std::atomic<bool> finished{false};
+  std::thread waiter([&pool, &started, &finished] {
+    started.store(true);
+    pool.Unpin(pool.Fix(2, AccessMode::kNormal));
+    finished.store(true);
+  });
+
+  while (!started.load()) std::this_thread::yield();
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_FALSE(finished.load());
+
+  pool.Unpin(first);
+  bool completed = false;
+  for (int tick = 0; tick < 300 && !completed; ++tick) {
+    if (finished.load()) {
+      completed = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  // 失败时也要把工作线程放出来，否则 join 会把整个用例挂在这里，失败原因
+  // 就只剩一个超时。
+  if (!completed) pool.Unpin(second);
+
+  waiter.join();
+  EXPECT_TRUE(completed);
+}
+
+// 写回失败时替换策略不该收到任何通知：淘汰没有成立，帧应当原样留在原来的
+// 层里。AbortEviction 曾经用 OnLoad 把帧"放回去"，对 ARC 那是一次幽灵命中
+// ——帧从 T1 被提到 T2、p 也被改掉，返回的帧看起来一样，淘汰顺序已经变了。
+// 这里用"下一次淘汰选谁"把它钉住：0 留在 T1 尾则再写它一次，被提到 T2 则
+// 下一次挑中的是干净的 1，一次写都不会发生。
+TEST(BufferPool, FailedWriteBackKeepsTheVictimInItsArcTier) {
+  const TableLayout layout = TestLayout();
+  test::MemoryPageFile file(layout.page_count(), layout.page_size());
+  using ArcPool = BufferPool<DirectPageTable, ArcReplacer>;
+  ArcPool pool(layout, 3, file, RowLockMode::kNone, DirectPageTable(layout.page_count()),
+               ArcReplacer(3, layout.page_count()));
+
+  Frame* zero = pool.Fix(0, AccessMode::kNormal);
+  pool.MarkDirty(zero);
+  pool.Unpin(zero);
+  pool.Unpin(pool.Fix(1, AccessMode::kNormal));
+  pool.Unpin(pool.Fix(2, AccessMode::kNormal));  // T1 = [2, 1, 0]
+
+  // 再命中 1 一次：它升到 T2，T1 = [2, 0]，脏页 0 是 T1 尾，下一个牺牲帧。
+  pool.Unpin(pool.Fix(1, AccessMode::kNormal));
+
+  file.fail_write_page.store(static_cast<int64_t>(0));
+  EXPECT_THROW(pool.Unpin(pool.Fix(3, AccessMode::kNormal)), std::runtime_error);
+
+  // 失败之后 0 必须还在 T1 尾：下一次淘汰应当再选它、把这次写回补上。
+  // 若帧被 OnLoad 重新"装"回 T1 头，淘汰会转向 2；若被当成幽灵命中提到 T2，
+  // 会转向 1。两者都干净，一次写都不会发生。
+  file.fail_write_page.store(-1);
+  pool.Unpin(pool.Fix(4, AccessMode::kNormal));
+  EXPECT_EQ(file.writes.load(), 1u);
 }
 
 }  // namespace mvcc

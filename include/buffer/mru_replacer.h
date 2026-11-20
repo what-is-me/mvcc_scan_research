@@ -20,6 +20,7 @@ class MruReplacer {
   void OnEvict(size_t frame, PageId page);
 
   std::optional<size_t> SelectVictim(PageId, std::span<const Frame> frames) const;
+  bool HasEvictable(std::span<const Frame> frames) const;
 
  private:
   void PushFront(size_t frame);

@@ -280,8 +280,8 @@ class BufferPool {
       const std::optional<size_t> reserved = ReserveFrame(page, lock);
       if (!reserved) {
         if (table_.Find(page)) continue;
-        cv_.wait(lock, [this, page] {
-          return !free_.empty() || replacer_.SelectVictim(page, frames_.span()).has_value();
+        cv_.wait(lock, [this] {
+          return !free_.empty() || replacer_.HasEvictable(frames_.span());
         });
         continue;
       }
@@ -318,15 +318,16 @@ class BufferPool {
     if (!victim) return std::nullopt;
 
     Frame& victim_frame = frames_[*victim];
-    assert(victim_frame.pin.load(std::memory_order_relaxed) == 0);
-    victim_frame.state.store(FrameState::kEvicting, std::memory_order_relaxed);
+    assert(Evictable(victim_frame));
     const PageId victim_page = victim_frame.page_id;
-    replacer_.OnEvict(*victim, victim_page);
     const bool was_dirty = victim_frame.dirty.load(std::memory_order_acquire);
+    victim_frame.state.store(FrameState::kEvicting, std::memory_order_relaxed);
 
-    // 写回在锁外进行。它抛出时不能把帧留在淘汰中：页表条目还指着它，
-    // 之后任何 Fix(这一页) 都会等在一个永远不会成立的谓词上。守卫在异常
-    // 路径把帧退回驻留态并重新挂回候选集，正常路径由 Commit 收尾。
+    // 写回在锁外进行。替换策略到这一步还什么都不知道：帧仍在它的结构里，只是
+    // 不再满足 Evictable，别的线程选不到它。写回抛出时帧退回驻留态，策略从头
+    // 到尾没被改过，也就不需要"恢复"——让 OnEvict 与 OnLoad 去模拟撤销，只会
+    // 把没有撤销语义的回调当成撤销用（ARC 会把它当作幽灵命中，连带改掉 tier
+    // 与 p）。淘汰真正成立之后才通知策略。
     EvictionGuard guard(*this, *victim, was_dirty);
 
     lock.unlock();
@@ -338,6 +339,7 @@ class BufferPool {
     lock.lock();
 
     guard.Commit();
+    replacer_.OnEvict(*victim, victim_page);
     table_.Erase(victim_page);
 
     // 写回期间别的线程可能已经把这一页装进来了；此时放弃淘汰，帧退还空闲表，
@@ -409,13 +411,14 @@ class BufferPool {
 
   // 写回失败时帧的磁盘副本仍是旧内容，但内存副本完好，退回驻留态是唯一
   // 自洽的选择：退还空闲表会因为 dirty 而丢掉数据，继续停在淘汰中会挂死。
-  // 异常继续抛给调用方——本系统没有 WAL 与恢复路径（§2），是否终止由上层定。
+  // 替换策略不用回退——OnEvict 还没调用过，帧一直挂在候选集里，只是 kEvicting
+  // 让它暂时不可选。异常继续抛给调用方：本系统没有 WAL 与恢复路径（§2），
+  // 是否终止由上层定。
   void AbortEviction(size_t index, bool dirty) {
     const std::lock_guard<std::mutex> lock(mutex_);
     Frame& frame = frames_[index];
     frame.state.store(FrameState::kResident, std::memory_order_release);
     frame.dirty.store(dirty, std::memory_order_release);
-    replacer_.OnLoad(index, frame.page_id, AccessMode::kNormal);
     cv_.notify_all();
   }
 

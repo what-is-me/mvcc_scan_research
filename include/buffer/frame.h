@@ -28,4 +28,12 @@ struct Frame {
   std::span<std::byte> data;
 };
 
+// 可作牺牲帧：驻留且未被固定。选中之后写回是在锁外做的，所以"淘汰中"的帧
+// 必须自己把自己排除掉——否则另一个线程的 SelectVictim 会再选它一次，两个
+// 线程同时写同一帧、各自往页表里塞不同的页。载入中的帧同理不可选。
+inline bool Evictable(const Frame& frame) {
+  return frame.pin.load(std::memory_order_relaxed) == 0 &&
+         frame.state.load(std::memory_order_relaxed) == FrameState::kResident;
+}
+
 }  // namespace mvcc

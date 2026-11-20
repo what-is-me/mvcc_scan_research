@@ -36,7 +36,7 @@ std::optional<size_t> LruKReplacer::SelectVictim(PageId, std::span<const Frame> 
 
   for (size_t frame = 0; frame < resident_.size(); ++frame) {
     if (!resident_[frame]) continue;
-    if (frames[frame].pin.load(std::memory_order_relaxed) != 0) continue;
+    if (!Evictable(frames[frame])) continue;
 
     const bool young = second_last_[frame] == 0;
     const uint64_t order = young ? last_[frame] : second_last_[frame];
@@ -49,6 +49,13 @@ std::optional<size_t> LruKReplacer::SelectVictim(PageId, std::span<const Frame> 
     }
   }
   return best;
+}
+
+bool LruKReplacer::HasEvictable(std::span<const Frame> frames) const {
+  for (size_t frame = 0; frame < resident_.size(); ++frame) {
+    if (resident_[frame] && Evictable(frames[frame])) return true;
+  }
+  return false;
 }
 
 }  // namespace mvcc

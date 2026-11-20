@@ -69,9 +69,16 @@ void LruReplacer::OnEvict(size_t frame, PageId) { Remove(frame); }
 
 std::optional<size_t> LruReplacer::SelectVictim(PageId, std::span<const Frame> frames) const {
   for (size_t frame = tail_; frame != kNoFrame; frame = prev_[frame]) {
-    if (frames[frame].pin.load(std::memory_order_relaxed) == 0) return frame;
+    if (Evictable(frames[frame])) return frame;
   }
   return std::nullopt;
+}
+
+bool LruReplacer::HasEvictable(std::span<const Frame> frames) const {
+  for (size_t frame = tail_; frame != kNoFrame; frame = prev_[frame]) {
+    if (Evictable(frames[frame])) return true;
+  }
+  return false;
 }
 
 }  // namespace mvcc
