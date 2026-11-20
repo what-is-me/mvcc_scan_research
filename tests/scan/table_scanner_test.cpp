@@ -252,6 +252,195 @@ TEST(TableScanner, SurvivesWhenThePoolIsSmallerThanTheTable) {
   EXPECT_LT(result.base_stats.hit_rate(), 0.5);
 }
 
+// 扫描策略之间必须逐字节可比：同一 read_ts 下四种策略读到的可见版本集合
+// 完全相同，差别只能体现在页的访问次序上。
+void ExpectPoliciesAgreeWithBaseline() {
+  Env env;
+  FillDerivedRows(env);
+
+  const std::vector<std::byte> one(env.layout.data_size(), std::byte{0x11});
+  const std::vector<std::byte> two(env.layout.data_size(), std::byte{0x22});
+  const std::vector<std::byte> three(env.layout.data_size(), std::byte{0x33});
+
+  // 快照先取，之后的提交全部落在快照之后——包括链长 3 的那一行。
+  const Timestamp read_ts = env.timestamps.ReadTimestamp();
+  UpdateRow(env, RowId::Make(0, 1), one, /*commit=*/true);
+  UpdateRow(env, RowId::Make(9, 5), two, /*commit=*/true);
+  UpdateRow(env, RowId::Make(9, 5), three, /*commit=*/true);
+  UpdateRow(env, RowId::Make(9, 5), one, /*commit=*/true);
+
+  // 再加一行被未提交事务置锁：基表版本被锁位挡住，同样要走链。
+  Txn txn(env.base, env.undo, env.layout, env.appender, env.timestamps, 0, env.context);
+  txn.Begin();
+  ASSERT_EQ(txn.Update(RowId::Make(20, 7), two), UpdateOutcome::kApplied);
+
+  const ScanResult baseline = env.scanner.Scan(read_ts, ScanPolicy::kBaseline);
+  // 三行都落在快照之后：一行更新一次、一行更新三次、一行未提交。
+  EXPECT_EQ(baseline.chain_rows, 3u);
+  EXPECT_EQ(baseline.chain_hops, 5u);
+  EXPECT_EQ(baseline.checksum, ExpectedChecksum(env.layout));
+
+  const ScanPolicy others[] = {ScanPolicy::kHotFirst, ScanPolicy::kDeferChain,
+                               ScanPolicy::kDeferPaged};
+  for (const ScanPolicy policy : others) {
+    const ScanResult result = env.scanner.Scan(read_ts, policy);
+    EXPECT_EQ(result.rows, baseline.rows);
+    EXPECT_EQ(result.chain_rows, baseline.chain_rows);
+    EXPECT_EQ(result.chain_hops, baseline.chain_hops);
+    EXPECT_EQ(result.checksum, baseline.checksum);
+  }
+
+  txn.Abort();
+}
+
+TEST(TableScanner, HotFirstAgreesWithBaseline) {
+  ExpectPoliciesAgreeWithBaseline();
+}
+
+// defer 的动机是把 undo 访问整体挪出主扫描。主扫描必须一行都不碰 undo 池，
+// 否则"顺带读到了"的页会污染两阶段的计时。
+TEST(TableScanner, DeferMainScanLeavesUndoUntouched) {
+  Env env;
+  FillDerivedRows(env);
+
+  const Timestamp read_ts = env.timestamps.ReadTimestamp();
+  const std::vector<std::byte> updated(env.layout.data_size(), std::byte{0x77});
+  UpdateRow(env, RowId::Make(1, 2), updated, /*commit=*/true);
+
+  DeferredScan scan = env.scanner.ScanDeferMain(read_ts);
+
+  EXPECT_EQ(scan.result.rows, env.layout.row_count());
+  EXPECT_EQ(scan.result.chain_rows, 1u);
+  EXPECT_EQ(scan.result.chain_hops, 0u);
+  EXPECT_EQ(scan.pending.size(), 1u);
+  EXPECT_EQ(scan.result.undo_stats.logical_reads, 0u);
+  EXPECT_EQ(scan.result.undo_stats.physical_reads, 0u);
+  // 主扫描的折叠只含基表可见版本：走链那一行留给第二阶段，此刻还没算进去。
+  const RowId deferred = RowId::Make(1, 2);
+  const uint64_t original = ExpectedChecksum(env.layout);
+  EXPECT_EQ(scan.result.checksum,
+            original ^ ChecksumBytes(RowData(env.layout.LinearRow(deferred),
+                                             env.layout.data_size())));
+
+  env.scanner.ResolveDeferredChain(scan, read_ts);
+
+  EXPECT_TRUE(scan.pending.empty());
+  EXPECT_EQ(scan.result.chain_hops, 1u);
+  EXPECT_EQ(scan.result.checksum, original);
+}
+
+// 页式的收益就是 undo 页的重复加载次数：同一个 undo 页上的多条链，链式每条
+// 各 Fix 一次，页式只装一次就在页内解析完。
+TEST(TableScanner, DeferPagedLoadsEachUndoPageOnce) {
+  const auto undo_reads = [](ScanPolicy policy) {
+    Env env(/*table_rows=*/32, 8, 8, /*prefetch=*/0);  // 单页基表
+    FillDerivedRows(env);
+
+    const Timestamp read_ts = env.timestamps.ReadTimestamp();
+    for (size_t slot = 0; slot < 8; ++slot) {
+      const std::vector<std::byte> data(env.layout.data_size(), static_cast<std::byte>(slot + 1));
+      UpdateRow(env, RowId::Make(0, slot), data, /*commit=*/true);
+    }
+
+    const ScanResult result = env.scanner.Scan(read_ts, policy);
+    EXPECT_EQ(result.chain_rows, 8u);
+    EXPECT_EQ(result.chain_hops, 8u);
+    return result.undo_stats.logical_reads;
+  };
+
+  EXPECT_EQ(undo_reads(ScanPolicy::kDeferChain), 8u);
+  EXPECT_EQ(undo_reads(ScanPolicy::kDeferPaged), 1u);
+}
+
+// 链跨 undo 页时页式要多轮迭代：每轮每个页只装一次，跨页的 prev 进下一轮。
+TEST(TableScanner, DeferPagedFollowsChainsAcrossPages) {
+  Env env(32, 8, 8, 0);
+  FillDerivedRows(env);
+
+  // 槽位 0 到 31 是同一页，第 33 条记录才落到第二页；每行更新一次只能造出
+  // 单跳链，所以改成一行的版本在页边界附近跨过去。
+  const Timestamp read_ts = env.timestamps.ReadTimestamp();
+  const RowId row = RowId::Make(0, 3);
+  for (uint8_t seed = 1; seed <= 40; ++seed) {
+    const std::vector<std::byte> data(env.layout.data_size(), static_cast<std::byte>(seed));
+    UpdateRow(env, row, data, /*commit=*/true);
+  }
+
+  const ScanResult paged = env.scanner.Scan(read_ts, ScanPolicy::kDeferPaged);
+  const ScanResult baseline = env.scanner.Scan(read_ts, ScanPolicy::kBaseline);
+
+  EXPECT_EQ(paged.chain_rows, 1u);
+  EXPECT_EQ(paged.chain_hops, baseline.chain_hops);
+  EXPECT_EQ(paged.chain_hops, 40u);
+  EXPECT_EQ(paged.checksum, baseline.checksum);
+  // 40 条记录跨两页：第一轮装页 1 解析 8 条，跨页后第二轮装页 0 走完。
+  EXPECT_EQ(paged.undo_stats.logical_reads, 2u);
+  EXPECT_EQ(baseline.undo_stats.logical_reads, 40u);
+}
+
+// hotfirst 的收益必须体现为物理读：热点页在快照里，先扫它们只花命中；baseline
+// 从页 0 顺序推进，冷页会把热点页挤出去，扫到热点页时还得重新读回来。
+//
+// 这个用例把扫描访问模式关掉：kScan 下新装入的页本就优先淘汰，扫描自己不会
+// 挤占常驻页，两种次序的 I/O 差异被这个模式掩盖。hotfirst 的收益只在
+// kNormal 下可见——两个模式的对照本身就是实验维度（§7.2）。
+TEST(TableScanner, HotFirstSavesTheReadsBaselinePaysFor) {
+  const auto run = [](ScanPolicy policy) {
+    Env env(/*table_rows=*/128, /*base_frames=*/2, /*undo_frames=*/8, /*prefetch=*/0);
+    FillDerivedRows(env);
+    EXPECT_EQ(env.layout.page_count(), 4u);
+
+    // 池里先装 2、3 两页，它们就是扫描开始瞬间的热点集合。
+    env.base.Unpin(env.base.Fix(3, AccessMode::kNormal));
+    env.base.Unpin(env.base.Fix(2, AccessMode::kNormal));
+
+    TableScanner<BasePool, UndoPool> scanner(env.base, env.undo, env.layout, AccessMode::kNormal);
+    const ScanResult result = scanner.Scan(1, policy);
+    return result.base_stats.physical_reads;
+  };
+
+  EXPECT_EQ(run(ScanPolicy::kHotFirst), 2u);   // 扫 2、3 命中；再读 0、1
+  EXPECT_EQ(run(ScanPolicy::kBaseline), 4u);   // 扫 0、1 时把 2、3 挤掉，又读回来
+}
+
+// I2 的窗口：读者先看到旧链头，写者随后追加记录并把链头换掉。判定失败时
+// 必须重读链头——从旧值回溯会跳过写者刚追加的那条记录，而它恰好就是快照
+// 需要的版本。这里用真实的 Row 复现这个交错，不依赖并发时序。
+TEST(TableScanner, RereadsTheChainHeadAfterTheWriterSwapsIt) {
+  const TableLayout layout(kPageSize, kRowSize, kTableRows);
+  std::vector<std::byte> bytes(layout.page_size());
+  const Page page(std::span<std::byte>(bytes), layout);
+  Row row = page.RowAt(0);
+
+  const RowId stale = RowId::Make(1, 1);
+  const RowId fresh = RowId::Make(2, 2);
+  row.set_version(VersionStamp::Committed(7));
+  row.set_undo_row_id(stale);
+
+  // 读者手里先拿着旧链头，写者随后换链头——真实交错里这两步分别发生在
+  // "首次读到 undo_row_id"与"重读"之间。
+  UndoRowId cursor = stale;
+  row.set_undo_row_id(fresh);
+
+  EXPECT_FALSE(scan_detail::CheckBaseVersion(row, /*read_ts=*/7, cursor));
+  EXPECT_EQ(cursor, fresh);
+}
+
+TEST(TableScanner, LeavesTheCursorAloneWhenTheBaseVersionIsVisible) {
+  const TableLayout layout(kPageSize, kRowSize, kTableRows);
+  std::vector<std::byte> bytes(layout.page_size());
+  const Page page(std::span<std::byte>(bytes), layout);
+  Row row = page.RowAt(0);
+
+  const RowId stale = RowId::Make(1, 1);
+  row.set_version(VersionStamp::Committed(7));
+  row.set_undo_row_id(stale);
+
+  UndoRowId cursor = RowId::Null();
+  EXPECT_TRUE(scan_detail::CheckBaseVersion(row, /*read_ts=*/8, cursor));
+  EXPECT_TRUE(cursor.is_null());
+}
+
 TEST(TableScanner, ChecksumIsDeterministicAndSensitive) {
   const std::vector<std::byte> first(kRowSize - kRowHeaderSize, std::byte{0x01});
 

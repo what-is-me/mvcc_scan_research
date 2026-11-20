@@ -199,5 +199,65 @@ TEST(TpWorkload, MidRunScansMatchReplayOracle) {
   }
 }
 
+// 同一 read_ts 下四种策略必须读到同一份快照。运行中只比 checksum：两次扫描
+// 之间链还在增长，新版本的 ts 都 >= read_ts，回溯会多经过它们，走链行数与
+// 跳数都会变，但可见版本集合不变。TP 停下来之后链不再增长，那时才逐字段比。
+TEST(TpWorkload, AllScanPoliciesAgreeUnderConcurrentTp) {
+  Env env(5000);
+
+  TpConfig config;
+  config.threads = 3;
+  config.rows_per_txn = 4;
+  config.txns_per_thread = 8000;
+  config.zipf_theta = 0.8;
+  config.mapping = KeyMapping::kScattered;
+
+  const KeyMapper mapper(env.layout.row_count(), config.mapping, config.seed);
+  std::vector<TpOutcome> partial(config.threads);
+  std::atomic<size_t> running{config.threads};
+
+  std::vector<std::thread> workers;
+  workers.reserve(config.threads);
+  for (size_t thread = 0; thread < config.threads; ++thread) {
+    workers.emplace_back([&, thread] {
+      RunTpWorker(env.base, env.undo, env.layout, env.allocator, env.timestamps, mapper, config,
+                  thread, partial[thread]);
+      running.fetch_sub(1, std::memory_order_release);
+    });
+  }
+
+  const ScanPolicy policies[] = {ScanPolicy::kBaseline, ScanPolicy::kHotFirst,
+                                 ScanPolicy::kDeferChain, ScanPolicy::kDeferPaged};
+  size_t live_samples = 0;
+  for (int sample = 0; sample < 4; ++sample) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (running.load(std::memory_order_acquire) == 0) break;
+
+    const Timestamp read_ts = env.timestamps.ReadTimestamp();
+    const ScanResult baseline = env.scanner.Scan(read_ts, ScanPolicy::kBaseline);
+    for (const ScanPolicy policy : policies) {
+      const ScanResult result = env.scanner.Scan(read_ts, policy);
+      EXPECT_EQ(result.rows, baseline.rows);
+      EXPECT_EQ(result.checksum, baseline.checksum)
+          << "policy=" << static_cast<int>(policy) << " read_ts=" << read_ts;
+    }
+    ++live_samples;
+  }
+  for (std::thread& worker : workers) worker.join();
+
+  ASSERT_GT(live_samples, 0u) << "TP 在第一次采样前就结束了，用例没测到并发";
+  ASSERT_GT(MergeTpOutcomes(partial).committed, 0u);
+
+  const Timestamp settled = env.timestamps.ReadTimestamp();
+  const ScanResult baseline = env.scanner.Scan(settled, ScanPolicy::kBaseline);
+  for (const ScanPolicy policy : policies) {
+    const ScanResult result = env.scanner.Scan(settled, policy);
+    EXPECT_EQ(result.rows, baseline.rows);
+    EXPECT_EQ(result.chain_rows, baseline.chain_rows);
+    EXPECT_EQ(result.chain_hops, baseline.chain_hops);
+    EXPECT_EQ(result.checksum, baseline.checksum);
+  }
+}
+
 }  // namespace
 }  // namespace mvcc

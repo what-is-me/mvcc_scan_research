@@ -200,6 +200,15 @@ class BufferPool {
     return frame_count_ - free_.size();
   }
 
+  // 快照当前页表里的页号（hotfirst 用它固化热点集合）。与并发装载/淘汰
+  // 竞争时结果允许近似——它只决定冷热两段的划分，不影响扫描的正确性：
+  // 快照之后被淘汰的页，扫到时会重新装入。返回顺序不作保证。
+  void CollectResidentPages(std::vector<PageId>& out) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    out.clear();
+    table_.ForEach([&out](PageId page, size_t) { out.push_back(page); });
+  }
+
   // 机械校验 §7.4 的不变量：页表与帧双向一致、一帧至多被一页引用、
   // 非驻留帧的 pin 必须为 0。只在测试里调用，生产路径不经过这里。
   bool CheckInvariants(std::string* error) const {
