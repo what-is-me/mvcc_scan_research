@@ -1,5 +1,9 @@
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -25,7 +29,7 @@ constexpr size_t kThreads = 4;
 constexpr size_t kTxnsPerThread = 500;
 constexpr size_t kBaseFrames = 128;
 constexpr size_t kUndoFrames = 128;
-constexpr size_t kUndoPages = 1200;
+constexpr size_t kUndoPages = 2400;
 constexpr size_t kPrefetch = 8;
 constexpr uint64_t kInitial = 0;
 
@@ -124,6 +128,74 @@ TEST(TpWorkload, HeadMappingTouchesFewerPages) {
 
   EXPECT_GT(head_reads, 0u);
   EXPECT_LT(head_reads, scattered_reads);
+}
+
+struct ScanSample {
+  Timestamp read_ts = 0;
+  uint64_t checksum = 0;
+};
+
+// §12 的中途扫描校验：TP 进行中反复取快照扫描，每次都与"回放
+// commit_ts < read_ts 的提交"后的期望比对。终态 oracle 只能保住最后一步，
+// 读到未提交版本、链头跳过已提交版本这类错误必须靠运行期采样暴露。
+TEST(TpWorkload, MidRunScansMatchReplayOracle) {
+  Env env;
+
+  TpConfig config;
+  config.threads = 2;
+  config.rows_per_txn = 1;
+  config.txns_per_thread = 20000;
+  config.zipf_theta = 0.8;
+  config.mapping = KeyMapping::kScattered;
+
+  const KeyMapper mapper(env.layout.row_count(), config.mapping, config.seed);
+  std::vector<TpOutcome> partial(config.threads);
+
+  std::atomic<bool> stop{false};
+  std::vector<ScanSample> samples;
+
+  std::thread scanner([&] {
+    while (!stop.load(std::memory_order_acquire)) {
+      const Timestamp read_ts = env.timestamps.ReadTimestamp();
+      const ScanResult result = env.scanner.ScanBaseline(read_ts);
+      samples.push_back(ScanSample{read_ts, result.checksum});
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  });
+
+  std::vector<std::thread> workers;
+  workers.reserve(config.threads);
+  for (size_t thread = 0; thread < config.threads; ++thread) {
+    workers.emplace_back([&, thread] {
+      RunTpWorker(env.base, env.undo, env.layout, env.allocator, env.timestamps, mapper,
+                  config, thread, partial[thread]);
+    });
+  }
+  for (std::thread& worker : workers) worker.join();
+  stop.store(true, std::memory_order_release);
+  scanner.join();
+
+  const TpOutcome outcome = MergeTpOutcomes(partial);
+  ASSERT_GT(outcome.committed, 0u);
+  ASSERT_GT(samples.size(), 3u);
+
+  // 快照可能因新的进行中提交而回退，采样顺序不保证 read_ts 单调。
+  std::sort(samples.begin(), samples.end(),
+            [](const ScanSample& left, const ScanSample& right) {
+              return left.read_ts < right.read_ts;
+            });
+
+  std::vector<uint64_t> state(env.layout.row_count(), kInitial);
+  size_t applied = 0;
+  for (const ScanSample& sample : samples) {
+    while (applied < outcome.commits.size() &&
+           outcome.commits[applied].commit_ts < sample.read_ts) {
+      state[env.layout.LinearRow(outcome.commits[applied].row)] = outcome.commits[applied].serial;
+      ++applied;
+    }
+    EXPECT_EQ(sample.checksum, ExpectedChecksum(state, env.layout.data_size()))
+        << "scan at read_ts=" << sample.read_ts;
+  }
 }
 
 }  // namespace
