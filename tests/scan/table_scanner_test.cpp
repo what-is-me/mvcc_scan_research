@@ -264,6 +264,41 @@ TEST(TableScanner, ChecksumIsDeterministicAndSensitive) {
   EXPECT_NE(ChecksumBytes(first), ChecksumBytes(std::span<const std::byte>(first).first(64)));
 }
 
+// 逐次扫描的增量只能算扫描自己的请求。池级计数器是所有线程共享的，并发 TP 的
+// 页请求也落在里面；前后取差会把别人的读写算到扫描头上，明细因此失真。
+TEST(TableScanner, PerScanStatsIgnoreConcurrentTraffic) {
+  Env env(kTableRows, 8, 8, 0);  // 关预取，页数才好对
+  FillDerivedRows(env);
+
+  const ScanResult first = env.scanner.ScanBaseline(1);
+  EXPECT_EQ(first.base_stats.logical_reads, env.layout.page_count());
+  EXPECT_EQ(first.base_stats.physical_reads, env.layout.page_count());
+
+  // 模拟并发 TP 的一次页请求：它只该进池级计数，不该进下一次扫描的明细。
+  env.base.Unpin(env.base.Fix(0, AccessMode::kNormal));
+  EXPECT_EQ(env.base.stats().logical_reads, env.layout.page_count() + 1);
+
+  const ScanResult second = env.scanner.ScanBaseline(1);
+  EXPECT_EQ(second.base_stats.logical_reads, env.layout.page_count());
+}
+
+// 扫描访问模式是 §7.2 的对照维度，必须真的传到池里。3 页的表、2 帧的池：
+// 扫完之后 kNormal 留下的是最后两页，kScan 留下的是第一页与最后一页，
+// 随后 Fix(0) 是否读盘就是判据。
+TEST(TableScanner, ScanAccessModeReachesThePool) {
+  const auto reads_after_fix = [](AccessMode mode) {
+    Env env(96, 2, 8, 0);
+    FillDerivedRows(env);
+    TableScanner<BasePool, UndoPool> scanner(env.base, env.undo, env.layout, mode);
+    scanner.ScanBaseline(1);
+    env.base.Unpin(env.base.Fix(0, AccessMode::kNormal));
+    return env.base_file.reads.load();
+  };
+
+  EXPECT_EQ(reads_after_fix(AccessMode::kNormal), 4u);  // 3 页 + 重新读回页 0
+  EXPECT_EQ(reads_after_fix(AccessMode::kScan), 3u);    // 页 0 还在池里
+}
+
 }  // namespace
 
 }  // namespace mvcc

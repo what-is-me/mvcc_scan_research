@@ -30,6 +30,7 @@ class ArcReplacer {
   void OnHit(size_t frame, PageId page, AccessMode mode);
   void OnLoad(size_t frame, PageId page, AccessMode mode);
   void OnEvict(size_t frame, PageId page);
+  void OnMiss(PageId page);
 
   std::optional<size_t> SelectVictim(PageId page, std::span<const Frame> frames) const;
   bool HasEvictable(std::span<const Frame> frames) const;
@@ -56,6 +57,7 @@ class ArcReplacer {
   FixedArray<uint8_t> ghost_;
   FixedArray<PageId> ghost_prev_;
   FixedArray<PageId> ghost_next_;
+  FixedArray<bool> adapted_;
   PageId b1_head_ = kNoGhost;
   PageId b1_tail_ = kNoGhost;
   PageId b2_head_ = kNoGhost;

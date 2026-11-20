@@ -76,13 +76,18 @@ class BufferPool {
     }
   }
 
-  Frame* Fix(PageId page, AccessMode mode) { return FixImpl(page, mode, LoadSource::kFile); }
+  // sink 非空时，本次请求的计数同时累加到它上面（调用方只在自己线程内读，
+  // 不必原子）。扫描器用它统计"这次扫描自己"的 I/O：池级计数含并发 TP，
+  // 前后取差会把别人的读写算到扫描头上。
+  Frame* Fix(PageId page, AccessMode mode, PoolStats* sink = nullptr) {
+    return FixImpl(page, mode, LoadSource::kFile, sink);
+  }
 
   // 装入一个"逻辑上存在、但从未落盘"的页：内容全零，不发设备读。undo 文件是
   // 空文件、只追加，新分配的页在第一次写回之前根本不在文件里，读它会直接
   // 报 EOF，所以第一条记录写入前必须走这里。
-  Frame* FixEmpty(PageId page, AccessMode mode) {
-    return FixImpl(page, mode, LoadSource::kZeroFill);
+  Frame* FixEmpty(PageId page, AccessMode mode, PoolStats* sink = nullptr) {
+    return FixImpl(page, mode, LoadSource::kZeroFill, sink);
   }
 
   void Unpin(Frame* frame) {
@@ -104,7 +109,7 @@ class BufferPool {
   // 预取 [first, first+count) 的连续页：一次定位读装整批，把每页的往返延迟
   // 摊到 count 页上。只是提示——已驻留或在途的页跳过，装进来的页不 pin，
   // 可能在真正访问前被淘汰。返回实际装入的页数。只允许单个线程调用。
-  size_t Prefetch(PageId first, size_t count, AccessMode mode) {
+  size_t Prefetch(PageId first, size_t count, AccessMode mode, PoolStats* sink = nullptr) {
     if (prefetch_pages_ == 0) return 0;
     if (first >= layout_.page_count()) return 0;
     count = std::min(count, static_cast<size_t>(layout_.page_count() - first));
@@ -117,10 +122,21 @@ class BufferPool {
     // 一个 vector 会把分配器拖进热路径。prefetch_mutex_ 保证同一时刻只有一
     // 个线程用它。
     size_t reserved_count = 0;
+    // 守卫必须挂在预留循环之前：循环里的淘汰写回会抛异常（磁盘满、注入的
+    // 钩子），此时前面几轮已经预留的帧停在载入中、页表条目还在，没人撤销
+    // 就会让这些页的 Fix 永远等下去。挂晚一步等于没有。
+    auto release = MakeScopeExit([&] {
+      if (reserved_count != 0) {
+        ReleaseReserved(std::span<const size_t>(reserved_scratch_.span().data(), reserved_count));
+      }
+    });
     {
       std::unique_lock<std::mutex> lock(mutex_);
       for (size_t offset = 0; offset < count; ++offset) {
-        if (const std::optional<size_t> index = ReserveFrame(first + offset, lock)) {
+        // 与 Fix 相同：先让策略自适应，再决定淘汰谁。预取页也计入逻辑请求，
+        // 所以它们同样要参与自适应，否则同一页经预取到达时 p 不会动。
+        replacer_.OnMiss(first + offset);
+        if (const std::optional<size_t> index = ReserveFrame(first + offset, lock, sink)) {
           reserved_scratch_[reserved_count++] = *index;
         }
       }
@@ -128,9 +144,6 @@ class BufferPool {
     if (reserved_count == 0) return 0;
 
     const std::span<std::byte> staging = prefetch_buffer_.span().first(count * layout_.page_size());
-    auto release = MakeScopeExit([&] {
-      ReleaseReserved(std::span<const size_t>(reserved_scratch_.span().data(), reserved_count));
-    });
     hooks_.Fire(PoolHookPoint::kBeforeFileRead);
     file_.ReadPages(first, count, staging);
     hooks_.Fire(PoolHookPoint::kAfterFileRead);
@@ -144,6 +157,12 @@ class BufferPool {
     // 只为已驻留页发起的重复设备读只进物理读，不属于页请求。
     logical_reads_.fetch_add(reserved_count, std::memory_order_relaxed);
     logical_misses_.fetch_add(reserved_count, std::memory_order_relaxed);
+    if (sink != nullptr) {
+      sink->logical_reads += reserved_count;
+      sink->logical_misses += reserved_count;
+      sink->physical_reads += count;
+      ++sink->physical_read_ops;
+    }
 
     {
       const std::lock_guard<std::mutex> lock(mutex_);
@@ -260,8 +279,9 @@ class BufferPool {
  private:
   enum class LoadSource { kFile, kZeroFill };
 
-  Frame* FixImpl(PageId page, AccessMode mode, LoadSource source) {
+  Frame* FixImpl(PageId page, AccessMode mode, LoadSource source, PoolStats* sink) {
     logical_reads_.fetch_add(1, std::memory_order_relaxed);
+    if (sink != nullptr) ++sink->logical_reads;
 
     for (;;) {
       std::unique_lock<std::mutex> lock(mutex_);
@@ -277,7 +297,12 @@ class BufferPool {
         continue;
       }
 
-      const std::optional<size_t> reserved = ReserveFrame(page, lock);
+      // 缺页：先让策略做一次自适应（ARC 的幽灵命中要把 p 调到新值），再做
+      // 淘汰决策。顺序反了就会用旧的 p 选牺牲帧——论文是"先调整后替换"。
+      // 策略内部按页记一次性标记，循环回到这里不会重复调整。
+      replacer_.OnMiss(page);
+
+      const std::optional<size_t> reserved = ReserveFrame(page, lock, sink);
       if (!reserved) {
         if (table_.Find(page)) continue;
         cv_.wait(lock, [this] {
@@ -288,7 +313,8 @@ class BufferPool {
 
       lock.unlock();
       logical_misses_.fetch_add(1, std::memory_order_relaxed);
-      return LoadInto(*reserved, page, mode, source);
+      if (sink != nullptr) ++sink->logical_misses;
+      return LoadInto(*reserved, page, mode, source, sink);
     }
   }
 
@@ -301,7 +327,8 @@ class BufferPool {
   // 在锁内为缺页的页占一个帧并写进页表，返回时帧处于 Loading，调用方负责装载。
   // 淘汰需要写回时会中途放开锁；返回 nullopt 表示该页已被别人装入，或暂时
   // 没有可淘汰的帧——两种情况都由调用方重新判断。
-  std::optional<size_t> ReserveFrame(PageId page, std::unique_lock<std::mutex>& lock) {
+  std::optional<size_t> ReserveFrame(PageId page, std::unique_lock<std::mutex>& lock,
+                                     PoolStats* sink) {
     if (table_.Find(page)) return std::nullopt;
 
     if (!free_.empty()) {
@@ -335,6 +362,7 @@ class BufferPool {
     if (was_dirty) {
       file_.WritePage(victim_page, victim_frame.data);
       physical_writes_.fetch_add(1, std::memory_order_relaxed);
+      if (sink != nullptr) ++sink->physical_writes;
     }
     lock.lock();
 
@@ -422,7 +450,8 @@ class BufferPool {
     cv_.notify_all();
   }
 
-  Frame* LoadInto(size_t index, PageId page, AccessMode mode, LoadSource source) {
+  Frame* LoadInto(size_t index, PageId page, AccessMode mode, LoadSource source,
+                  PoolStats* sink) {
     Frame& frame = frames_[index];
     if (source == LoadSource::kFile) {
       // 装载失败必须把占位还回去，否则该页永远停在"载入中"，之后任何 Fix
@@ -434,6 +463,10 @@ class BufferPool {
       abandon.Dismiss();
       physical_reads_.fetch_add(1, std::memory_order_relaxed);
       physical_read_ops_.fetch_add(1, std::memory_order_relaxed);
+      if (sink != nullptr) {
+        ++sink->physical_reads;
+        ++sink->physical_read_ops;
+      }
     } else {
       std::memset(frame.data.data(), 0, frame.data.size());
     }

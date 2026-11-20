@@ -32,11 +32,23 @@ std::string Compiler() {
 
 std::string OperatingSystem() {
 #if defined(_WIN32)
+#if defined(_M_ARM64)
+  return "Windows arm64";
+#else
   return sizeof(void*) == 8 ? "Windows x64" : "Windows x86";
+#endif
 #elif defined(__linux__)
+#if defined(__aarch64__)
+  return "Linux arm64";
+#else
   return sizeof(void*) == 8 ? "Linux x64" : "Linux x86";
+#endif
 #elif defined(__APPLE__)
-  return sizeof(void*) == 8 ? "macOS arm64" : "macOS x86";
+#if defined(__aarch64__) || defined(__arm64__)
+  return "macOS arm64";
+#else
+  return "macOS x86_64";
+#endif
 #else
   return "unknown";
 #endif

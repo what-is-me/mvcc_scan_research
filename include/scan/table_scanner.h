@@ -18,8 +18,10 @@
 
 namespace mvcc {
 
-// 扫描的副产品：行数、走链行数、总跳数、可见数据的折叠值，以及本次扫描期间
-// 两个池的计数增量（对应结果 JSON 里 details[] 的每扫描字段）。
+// 扫描的副产品：行数、走链行数、总跳数、可见数据的折叠值，以及本次扫描**自己**
+// 发出的页请求计数（对应结果 JSON 里 details[] 的每扫描字段）。计数由池在调用
+// 线程内累加到这两个字段上，不含并发 TP 的流量——池级计数器是所有线程共享的，
+// 前后取差会把别人的读写算到扫描头上。
 struct ScanResult {
   size_t rows = 0;
   size_t chain_rows = 0;
@@ -51,14 +53,6 @@ inline uint64_t FoldWords(size_t word_count, LoadWord load) {
   return a ^ std::rotl(b, 17) ^ std::rotl(c, 31) ^ std::rotl(d, 47);
 }
 
-inline PoolStats StatsDelta(const PoolStats& after, const PoolStats& before) {
-  return PoolStats{after.logical_reads - before.logical_reads,
-                   after.logical_misses - before.logical_misses,
-                   after.physical_reads - before.physical_reads,
-                   after.physical_read_ops - before.physical_read_ops,
-                   after.physical_writes - before.physical_writes};
-}
-
 }  // namespace scan_detail
 
 // 折叠一段字节。只用于跨实现比对：XOR 可交换，所以整表的期望值可以按行
@@ -77,16 +71,17 @@ inline uint64_t ChecksumBytes(std::span<const std::byte> bytes) {
 template <typename BasePool, typename UndoPool>
 class TableScanner {
  public:
-  TableScanner(BasePool& base_pool, UndoPool& undo_pool, const TableLayout& layout)
-      : base_pool_(&base_pool), undo_pool_(&undo_pool), layout_(&layout) {}
+  // mode 是 §7.2 的对照维度：kScan 不刷新新近性、新装入的页优先淘汰；kNormal
+  // 与普通访问无异。undo 链的读始终按 kNormal——undo 池没有"普通访问"这回事，
+  // 链遍历就是它的正常访问，整片扫成扫描模式会让它的 LRU 失去意义。
+  TableScanner(BasePool& base_pool, UndoPool& undo_pool, const TableLayout& layout,
+               AccessMode mode = AccessMode::kScan)
+      : base_pool_(&base_pool), undo_pool_(&undo_pool), layout_(&layout), mode_(mode) {}
 
   TableScanner(const TableScanner&) = delete;
   TableScanner& operator=(const TableScanner&) = delete;
 
   ScanResult ScanBaseline(Timestamp read_ts) {
-    const PoolStats base_before = base_pool_->stats();
-    const PoolStats undo_before = undo_pool_->stats();
-
     ScanResult result;
     const size_t page_count = layout_->page_count();
     const size_t capacity = base_pool_->prefetch_capacity();
@@ -95,11 +90,12 @@ class TableScanner {
     for (size_t first = 0; first < page_count; first += batch) {
       const size_t count = std::min(batch, page_count - first);
       if (capacity != 0) {
-        base_pool_->Prefetch(static_cast<PageId>(first), count, AccessMode::kScan);
+        base_pool_->Prefetch(static_cast<PageId>(first), count, mode_, &result.base_stats);
       }
 
       for (size_t index = 0; index < count; ++index) {
-        Frame* frame = base_pool_->Fix(static_cast<PageId>(first + index), AccessMode::kScan);
+        Frame* frame =
+            base_pool_->Fix(static_cast<PageId>(first + index), mode_, &result.base_stats);
         const PinGuard<BasePool> pin(*base_pool_, frame);
         const Page page(frame->data, *layout_);
         for (size_t slot = 0; slot < page.row_count(); ++slot) {
@@ -108,8 +104,6 @@ class TableScanner {
       }
     }
 
-    result.base_stats = scan_detail::StatsDelta(base_pool_->stats(), base_before);
-    result.undo_stats = scan_detail::StatsDelta(undo_pool_->stats(), undo_before);
     return result;
   }
 
@@ -137,7 +131,7 @@ class TableScanner {
 
     for (;;) {
       assert(!cursor.is_null());
-      Frame* frame = undo_pool_->Fix(cursor.page(), AccessMode::kNormal);
+      Frame* frame = undo_pool_->Fix(cursor.page(), AccessMode::kNormal, &result.undo_stats);
       const PinGuard<UndoPool> pin(*undo_pool_, frame);
       const Row record = Page(frame->data, *layout_).RowAt(cursor.slot());
       ++result.chain_hops;
@@ -154,6 +148,7 @@ class TableScanner {
   BasePool* base_pool_;
   UndoPool* undo_pool_;
   const TableLayout* layout_;
+  AccessMode mode_;
 };
 
 }  // namespace mvcc

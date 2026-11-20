@@ -19,6 +19,7 @@ class LruReplacer {
   void OnHit(size_t frame, PageId page, AccessMode mode);
   void OnLoad(size_t frame, PageId page, AccessMode mode);
   void OnEvict(size_t frame, PageId page);
+  void OnMiss(PageId) {}
 
   std::optional<size_t> SelectVictim(PageId, std::span<const Frame> frames) const;
   bool HasEvictable(std::span<const Frame> frames) const;

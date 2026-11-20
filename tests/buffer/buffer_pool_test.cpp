@@ -413,4 +413,29 @@ TEST(BufferPool, FailedWriteBackKeepsTheVictimInItsArcTier) {
   EXPECT_EQ(file.writes.load(), 1u);
 }
 
+// 预取的预留循环本身会触发淘汰写回，写回失败时前面几轮已经预留的页必须原样
+// 退回。它们停在"载入中"、页表条目还在，没人撤销的话之后对那一页的 Fix 会永远
+// 等在一个不会成立的谓词上——清理守卫挂在循环之后就等于没有。
+TEST(BufferPool, FailedPrefetchLeavesNoReservedFrames) {
+  const TableLayout layout = TestLayout();
+  test::MemoryPageFile file(layout.page_count(), layout.page_size());
+  Pool pool(layout, 2, file, RowLockMode::kNone, DirectPageTable(layout.page_count()),
+            LruReplacer(2), PoolHooks(), 4);
+
+  Frame* dirty = pool.Fix(0, AccessMode::kNormal);
+  pool.MarkDirty(dirty);
+  pool.Unpin(dirty);
+
+  // 页 1 先占掉空闲帧，页 2 就只剩脏页 0 可淘汰——写回在这里失败。
+  file.fail_write_page.store(static_cast<int64_t>(0));
+  EXPECT_THROW(pool.Prefetch(1, 4, AccessMode::kScan), std::runtime_error);
+
+  // 页 1 的预留若没被撤销，这一行会永久阻塞。
+  file.fail_write_page.store(-1);
+  pool.Unpin(pool.Fix(1, AccessMode::kNormal));
+
+  std::string error;
+  EXPECT_TRUE(pool.CheckInvariants(&error)) << error;
+}
+
 }  // namespace mvcc

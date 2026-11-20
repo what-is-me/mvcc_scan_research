@@ -2,6 +2,7 @@
 
 #include <charconv>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <system_error>
 
@@ -12,6 +13,12 @@ namespace {
 
 constexpr size_t kRowHeaderBytes = 16;
 constexpr size_t kMaxRowsPerPage = 65536;
+
+// undo 无 GC，每条更新留一条行宽的记录，容量必须覆盖整个实验时长（§11）。
+// 速率取 100 万行/秒：本机 TP 实测在 10 万行/秒量级（内存文件、零 I/O 等待），
+// 留一个数量级的余量给更快的机器和更多线程。启动就报错，不要跑一半写满磁盘。
+constexpr uint64_t kMaxUpdatesPerSecond = 1'000'000;
+constexpr uint64_t kGiB = 1024ull * 1024 * 1024;
 
 std::string_view Trim(std::string_view text) {
   const size_t begin = text.find_first_not_of(" \t\r\n");
@@ -196,6 +203,16 @@ std::string Config::Validate() const {
   if (base_pool_mb == 0) return "base_pool_mb must be positive";
   if (undo_pool_mb == 0) return "undo_pool_mb must be positive";
   if (undo_capacity_gb == 0) return "undo_capacity_gb must be positive";
+
+  const uint64_t undo_required = static_cast<uint64_t>(duration_s) * kMaxUpdatesPerSecond *
+                                 static_cast<uint64_t>(row_size_b);
+  if (static_cast<uint64_t>(undo_capacity_gb) * kGiB < undo_required) {
+    const uint64_t required_gb = (undo_required + kGiB - 1) / kGiB;
+    return "undo_capacity_gb must be at least " + std::to_string(required_gb) +
+           " for duration_s=" + std::to_string(duration_s) +
+           " (estimated at 1M updates/s); raise it or shorten the run";
+  }
+
   if (tp_threads == 0) return "tp_threads must be positive";
   if (rows_per_txn == 0) return "rows_per_txn must be positive";
   if (scan_interval_ms == 0) return "scan_interval_ms must be positive";

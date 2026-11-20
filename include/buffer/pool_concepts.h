@@ -31,6 +31,11 @@ concept PageMapping = requires(M mapping, const M& const_mapping, PageId page, s
 // 任何状态。条件变量等帧时用它作谓词：Clock 的 SelectVictim 会推进 hand 并把
 // 热帧降冷，若拿它当谓词，改完状态返回 false 就会睡在一个再没人通知的等待上
 // （Unpin 只在 pin 落到 0 时通知，而那一刻已经过去了）。
+//
+// OnMiss(页号) 在缺页请求进入池、尚未选牺牲帧之前调用，供策略按历史做自适应
+// （ARC 的幽灵命中在这里把 p 调到新值——论文的顺序是"先调整后替换"，放到装载
+// 完成时才调就会用旧的 p 选这一次的牺牲帧）。同一页的一次缺页可能因等待而多
+// 次经过这里，策略必须自己保证幂等。
 template <typename R>
 concept FrameReplacer =
     requires(R replacer, const R& const_replacer, size_t frame, PageId page, AccessMode mode,
@@ -38,6 +43,7 @@ concept FrameReplacer =
       { replacer.OnHit(frame, page, mode) } -> std::same_as<void>;
       { replacer.OnLoad(frame, page, mode) } -> std::same_as<void>;
       { replacer.OnEvict(frame, page) } -> std::same_as<void>;
+      { replacer.OnMiss(page) } -> std::same_as<void>;
       { const_replacer.SelectVictim(page, frames) } -> std::same_as<std::optional<size_t>>;
       { const_replacer.HasEvictable(frames) } -> std::same_as<bool>;
     };

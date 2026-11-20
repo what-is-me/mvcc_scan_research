@@ -165,6 +165,17 @@ TEST(Config, DefaultFileMatchesBuiltInDefaults) {
 
 TEST(Config, ValidateAcceptsDefaults) { EXPECT_EQ(Config().Validate(), ""); }
 
+// undo 无 GC，容量必须覆盖实验时长内的全部更新：300 s × 100 万行/秒 × 128 B
+// 约 36 GiB，默认的 16 GiB 不够，启动就该拒绝而不是跑到一半写满磁盘。
+TEST(Config, ValidateRejectsUndoCapacityBelowTheEstimate) {
+  Config config;
+  config.duration_s = 300;
+  EXPECT_NE(config.Validate().find("undo_capacity_gb"), std::string::npos);
+
+  config.undo_capacity_gb = 64;
+  EXPECT_EQ(config.Validate(), "");
+}
+
 TEST(Config, ValidateRejectsRowLargerThanPage) {
   Config config;
   config.page_size_kb = 4;

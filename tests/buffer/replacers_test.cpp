@@ -159,7 +159,8 @@ TEST(ArcReplacer, GhostHitOnB1MovesPageToT2) {
 
   arc.OnLoad(0, PageId{0}, AccessMode::kNormal);
   arc.OnEvict(0, PageId{0});                      // 0 -> B1
-  arc.OnLoad(0, PageId{0}, AccessMode::kNormal);  // 幽灵命中 -> T2，p -> 1
+  arc.OnMiss(PageId{0});                          // 幽灵命中：p -> 1
+  arc.OnLoad(0, PageId{0}, AccessMode::kNormal);  // 装回 T2
 
   // T1 = {}，T2 = {0}，p = 1：T1 <= p，从 T2 淘汰 0。
   EXPECT_EQ(arc.SelectVictim(PageId{7}, frames).value_or(kNoFrame), 0u);
@@ -186,7 +187,11 @@ TEST(ArcReplacer, B1GhostHitScalesByTheOtherGhostList) {
   arc.OnLoad(0, PageId{3}, AccessMode::kNormal);
   arc.OnEvict(0, PageId{3});
 
-  arc.OnLoad(0, PageId{3}, AccessMode::kNormal);  // B1 命中：p = 0 + 3/1 = 3
+  // B1 命中：p = 0 + max(1, |B2|/|B1|) = 3。调两次也只调一次——同一次缺页
+  // 可能因等待而多次经过 OnMiss，重复相加就不是论文的公式了。
+  arc.OnMiss(PageId{3});
+  arc.OnMiss(PageId{3});
+  arc.OnLoad(0, PageId{3}, AccessMode::kNormal);
 
   // 摆成 |T1| = |T2| = 2。p = 3 时 |T1| 没超过目标，从 T2 尾（2 号帧）淘汰；
   // 若把比例写反、p 只有 1，就会转向 T1 尾（1 号帧）。
@@ -198,6 +203,25 @@ TEST(ArcReplacer, B1GhostHitScalesByTheOtherGhostList) {
   arc.OnLoad(0, PageId{7}, AccessMode::kNormal);
 
   EXPECT_EQ(arc.SelectVictim(PageId{8}, frames).value_or(kNoFrame), 2u);
+}
+
+// OnMiss 对同一条幽灵只调一次：连调两次后 p 必须是 1，写成 2 的话下一次
+// 选帧就会从 T2 尾而不是 T1 尾取。
+TEST(ArcReplacer, MissOnTheSameGhostEntryAdaptsOnce) {
+  std::vector<Frame> frames = ResidentFrames(3);
+  ArcReplacer arc(3, 8);
+
+  arc.OnLoad(0, PageId{0}, AccessMode::kNormal);
+  arc.OnEvict(0, PageId{0});  // B1 = {0}、|B2| = 0 -> δ1 = max(1, 0/1) = 1
+  arc.OnMiss(PageId{0});
+  arc.OnMiss(PageId{0});
+  arc.OnLoad(0, PageId{0}, AccessMode::kNormal);  // 装回 T2
+
+  arc.OnLoad(1, PageId{1}, AccessMode::kNormal);  // T1 = [1]
+  arc.OnLoad(2, PageId{2}, AccessMode::kNormal);  // T1 = [2, 1]
+
+  // p = 1 时 |T1| = 2 超过目标，从 T1 尾（1 号帧）淘汰；p = 2 时不超，转向 T2。
+  EXPECT_EQ(arc.SelectVictim(PageId{7}, frames).value_or(kNoFrame), 1u);
 }
 
 // 扫描装入的页进 T1 头部——按位置是最后被淘汰的，靠冷标记才排到最前。

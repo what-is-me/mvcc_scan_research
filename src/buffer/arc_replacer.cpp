@@ -21,6 +21,7 @@ ArcReplacer::ArcReplacer(size_t frame_count, size_t page_count)
       ghost_(page_count),
       ghost_prev_(page_count),
       ghost_next_(page_count),
+      adapted_(page_count),
       capacity_(frame_count) {
   assert(frame_count > 0);
   assert(page_count > 0);
@@ -33,6 +34,7 @@ ArcReplacer::ArcReplacer(size_t frame_count, size_t page_count)
   }
   for (size_t page = 0; page < page_count; ++page) {
     ghost_[page] = 0;
+    adapted_[page] = false;
     ghost_prev_[page] = kNoGhost;
     ghost_next_[page] = kNoGhost;
   }
@@ -90,6 +92,7 @@ void ArcReplacer::PushGhost(bool to_b1, PageId page) {
   RemoveGhost(page);
 
   ghost_[page] = to_b1 ? 1 : 2;
+  adapted_[page] = false;
   ghost_prev_[page] = kNoGhost;
   if (to_b1) {
     ghost_next_[page] = b1_head_;
@@ -162,21 +165,28 @@ void ArcReplacer::OnHit(size_t frame, PageId, AccessMode mode) {
   }
 }
 
-void ArcReplacer::OnLoad(size_t frame, PageId page, AccessMode mode) {
-  // 幽灵命中说明这个页被淘汰之后又被访问了：装回 T2，并按命中前 B1/B2 的
-  // 比例调整目标 T1 大小。比例必须在 RemoveGhost 之前算，否则分母已经变了。
+// 幽灵命中：这个页被淘汰之后又被请求了，说明它所在的那一层给得太小，先调 p
+// 再选牺牲帧（论文的 Case II/III 顺序）。同一次缺页可能因等待多次经过这里，
+// adapted_ 保证每出一条幽灵只调整一次。
+void ArcReplacer::OnMiss(PageId page) {
   const uint8_t which = page < ghost_.size() ? ghost_[page] : 0;
-  const size_t b1_before = b1_size_;
-  const size_t b2_before = b2_size_;
+  if (which == 0 || adapted_[page]) return;
+  adapted_[page] = true;
 
+  // 步长按"另一条"幽灵链表的长度缩放：较小的那条覆盖的历史更短，它的一次
+  // 命中代表更强的信号。比例要在摘除幽灵之前取，否则分母已经变了。
   if (which == 1) {
-    target_t1_ = std::min(capacity_, target_t1_ + Ratio(b2_before, b1_before));
-    RemoveGhost(page);
-  } else if (which == 2) {
-    const size_t step = Ratio(b1_before, b2_before);
+    target_t1_ = std::min(capacity_, target_t1_ + Ratio(b2_size_, b1_size_));
+  } else {
+    const size_t step = Ratio(b1_size_, b2_size_);
     target_t1_ = step < target_t1_ ? target_t1_ - step : 0;
-    RemoveGhost(page);
   }
+}
+
+void ArcReplacer::OnLoad(size_t frame, PageId page, AccessMode mode) {
+  // p 已经在 OnMiss 里调过，这里只负责把页从幽灵链摘下、装回 T2。
+  const uint8_t which = page < ghost_.size() ? ghost_[page] : 0;
+  if (which != 0) RemoveGhost(page);
 
   Remove(tier_[frame], frame);
   PushFront(which == 0 ? Tier::kT1 : Tier::kT2, frame);
