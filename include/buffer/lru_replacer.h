@@ -16,11 +16,11 @@ class LruReplacer {
  public:
   explicit LruReplacer(size_t frame_count);
 
-  void OnHit(size_t frame, AccessMode mode);
-  void OnLoad(size_t frame, AccessMode mode);
-  void OnEvict(size_t frame);
+  void OnHit(size_t frame, PageId page, AccessMode mode);
+  void OnLoad(size_t frame, PageId page, AccessMode mode);
+  void OnEvict(size_t frame, PageId page);
 
-  std::optional<size_t> SelectVictim(std::span<const Frame> frames) const;
+  std::optional<size_t> SelectVictim(PageId, std::span<const Frame> frames) const;
 
  private:
   void PushFront(size_t frame);

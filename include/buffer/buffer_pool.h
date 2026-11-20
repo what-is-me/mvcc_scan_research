@@ -155,7 +155,7 @@ class BufferPool {
         frame.dirty.store(false, std::memory_order_relaxed);
         frame.pin.store(0, std::memory_order_relaxed);
         frame.state.store(FrameState::kResident, std::memory_order_release);
-        replacer_.OnLoad(index, mode);
+        replacer_.OnLoad(index, frame.page_id, mode);
       }
     }
     cv_.notify_all();
@@ -270,7 +270,7 @@ class BufferPool {
         Frame& frame = frames_[*index];
         if (frame.state.load(std::memory_order_relaxed) == FrameState::kResident) {
           frame.pin.fetch_add(1, std::memory_order_relaxed);
-          replacer_.OnHit(*index, mode);
+          replacer_.OnHit(*index, page, mode);
           return &frame;
         }
         cv_.wait(lock, [this, page] { return !InFlight(page); });
@@ -280,8 +280,8 @@ class BufferPool {
       const std::optional<size_t> reserved = ReserveFrame(page, lock);
       if (!reserved) {
         if (table_.Find(page)) continue;
-        cv_.wait(lock, [this] {
-          return !free_.empty() || replacer_.SelectVictim(frames_.span()).has_value();
+        cv_.wait(lock, [this, page] {
+          return !free_.empty() || replacer_.SelectVictim(page, frames_.span()).has_value();
         });
         continue;
       }
@@ -314,14 +314,14 @@ class BufferPool {
       return index;
     }
 
-    const std::optional<size_t> victim = replacer_.SelectVictim(frames_.span());
+    const std::optional<size_t> victim = replacer_.SelectVictim(page, frames_.span());
     if (!victim) return std::nullopt;
 
     Frame& victim_frame = frames_[*victim];
     assert(victim_frame.pin.load(std::memory_order_relaxed) == 0);
     victim_frame.state.store(FrameState::kEvicting, std::memory_order_relaxed);
-    replacer_.OnEvict(*victim);
     const PageId victim_page = victim_frame.page_id;
+    replacer_.OnEvict(*victim, victim_page);
     const bool was_dirty = victim_frame.dirty.load(std::memory_order_acquire);
 
     // 写回在锁外进行。它抛出时不能把帧留在淘汰中：页表条目还指着它，
@@ -415,7 +415,7 @@ class BufferPool {
     Frame& frame = frames_[index];
     frame.state.store(FrameState::kResident, std::memory_order_release);
     frame.dirty.store(dirty, std::memory_order_release);
-    replacer_.OnLoad(index, AccessMode::kNormal);
+    replacer_.OnLoad(index, frame.page_id, AccessMode::kNormal);
     cv_.notify_all();
   }
 
@@ -441,7 +441,7 @@ class BufferPool {
       frame.dirty.store(false, std::memory_order_relaxed);
       frame.pin.store(1, std::memory_order_relaxed);
       frame.state.store(FrameState::kResident, std::memory_order_release);
-      replacer_.OnLoad(index, mode);
+      replacer_.OnLoad(index, page, mode);
     }
     cv_.notify_all();
     return &frame;

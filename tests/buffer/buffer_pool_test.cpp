@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include "buffer/buffer_pool.h"
+#include "buffer/arc_replacer.h"
 #include "buffer/lru_replacer.h"
 #include "buffer/page_table.h"
 #include "buffer/pool_concepts.h"
@@ -316,6 +317,24 @@ TEST(BufferPool, FailedWriteBackLeavesTheFrameResident) {
   file.fail_write_page.store(-1);
   pool.Unpin(pool.Fix(1, AccessMode::kNormal));
   EXPECT_EQ(file.writes.load(), 1u);
+}
+
+TEST(BufferPool, ArcReplacerKeepsInvariantsAcrossEvictions) {
+  const TableLayout layout = TestLayout();
+  test::MemoryPageFile file(layout.page_count(), layout.page_size());
+  BufferPool<DirectPageTable, ArcReplacer> pool(layout, 4, file, RowLockMode::kNone,
+                                                DirectPageTable(layout.page_count()),
+                                                ArcReplacer(4, layout.page_count()));
+
+  // 顺序访问整表，4 帧装不下，每一步都在淘汰。
+  for (PageId page = 0; page < layout.page_count(); ++page) {
+    Frame* frame = pool.Fix(page, AccessMode::kNormal);
+    ASSERT_EQ(frame->page_id, page);
+    pool.Unpin(frame);
+  }
+
+  std::string error;
+  EXPECT_TRUE(pool.CheckInvariants(&error)) << error;
 }
 
 }  // namespace mvcc

@@ -50,13 +50,13 @@ void LruReplacer::Remove(size_t frame) {
   linked_[frame] = false;
 }
 
-void LruReplacer::OnHit(size_t frame, AccessMode mode) {
+void LruReplacer::OnHit(size_t frame, PageId, AccessMode mode) {
   if (mode != AccessMode::kNormal || !linked_[frame]) return;
   Remove(frame);
   PushFront(frame);
 }
 
-void LruReplacer::OnLoad(size_t frame, AccessMode mode) {
+void LruReplacer::OnLoad(size_t frame, PageId, AccessMode mode) {
   Remove(frame);
   if (mode == AccessMode::kScan) {
     PushBack(frame);
@@ -65,9 +65,9 @@ void LruReplacer::OnLoad(size_t frame, AccessMode mode) {
   }
 }
 
-void LruReplacer::OnEvict(size_t frame) { Remove(frame); }
+void LruReplacer::OnEvict(size_t frame, PageId) { Remove(frame); }
 
-std::optional<size_t> LruReplacer::SelectVictim(std::span<const Frame> frames) const {
+std::optional<size_t> LruReplacer::SelectVictim(PageId, std::span<const Frame> frames) const {
   for (size_t frame = tail_; frame != kNoFrame; frame = prev_[frame]) {
     if (frames[frame].pin.load(std::memory_order_relaxed) == 0) return frame;
   }
