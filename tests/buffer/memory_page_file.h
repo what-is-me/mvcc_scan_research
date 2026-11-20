@@ -52,6 +52,9 @@ class MemoryPageFile : public PageFile {
   }
 
   void WritePage(PageId page, std::span<const std::byte> src) override {
+    if (fail_write_page.load(std::memory_order_relaxed) == static_cast<int64_t>(page)) {
+      throw std::runtime_error("injected write failure");
+    }
     std::memcpy(data_.data() + page * page_size_, src.data(), page_size_);
     writes.fetch_add(1, std::memory_order_relaxed);
   }
@@ -66,6 +69,9 @@ class MemoryPageFile : public PageFile {
 
   // 读该页即抛异常，用于验证装载失败 / 提交失败不会留下半成品状态。
   std::atomic<int64_t> fail_page{-1};
+
+  // 写该页即抛异常，用于验证写回失败不会把帧永久留在淘汰中。
+  std::atomic<int64_t> fail_write_page{-1};
 
  private:
   size_t page_size_;

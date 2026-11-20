@@ -290,4 +290,32 @@ TEST(BufferPool, FailedLoadReleasesTheFrameInsteadOfWedgingThePage) {
   EXPECT_TRUE(pool.CheckInvariants(&error)) << error;
 }
 
+TEST(BufferPool, FailedWriteBackLeavesTheFrameResident) {
+  const TableLayout layout = TestLayout();
+  test::MemoryPageFile file(layout.page_count(), layout.page_size());
+  Pool pool = MakePool(layout, 1, file);
+
+  Frame* dirty = pool.Fix(0, AccessMode::kNormal);
+  std::memset(dirty->data.data(), 0xAB, layout.page_size());
+  pool.MarkDirty(dirty);
+  pool.Unpin(dirty);
+
+  file.fail_write_page.store(static_cast<int64_t>(0));
+  EXPECT_THROW(pool.Fix(1, AccessMode::kNormal), std::runtime_error);
+
+  // 写回失败若把帧留在淘汰中，这一行会永久阻塞；必须退回驻留态并保留脏标志。
+  Frame* recovered = pool.Fix(0, AccessMode::kNormal);
+  EXPECT_EQ(recovered->page_id, PageId{0});
+  EXPECT_TRUE(recovered->dirty.load(std::memory_order_relaxed));
+  pool.Unpin(recovered);
+
+  std::string error;
+  EXPECT_TRUE(pool.CheckInvariants(&error)) << error;
+
+  // 故障清除后，同一帧的写回应能正常完成。
+  file.fail_write_page.store(-1);
+  pool.Unpin(pool.Fix(1, AccessMode::kNormal));
+  EXPECT_EQ(file.writes.load(), 1u);
+}
+
 }  // namespace mvcc

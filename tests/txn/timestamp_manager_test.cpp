@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstdint>
 #include <future>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -57,6 +58,20 @@ TEST(TimestampManager, StartsIdleAtCounterOne) {
   EXPECT_EQ(manager.slot_count(), 4u);
   EXPECT_EQ(manager.counter(), Timestamp{1});
   EXPECT_EQ(manager.ReadTimestamp(), Timestamp{1});
+}
+
+void ThrowWhileReserved(void*, TimestampHookPoint) {
+  throw std::runtime_error("injected hook failure");
+}
+
+TEST(TimestampManager, ThrowingHookReleasesTheReservedSlot) {
+  TimestampManager timestamps(1, TimestampHooks(&ThrowWhileReserved, nullptr));
+
+  EXPECT_THROW({ CommitScope scope(timestamps, 0); }, std::runtime_error);
+
+  // 预留态必须撤销。停在 kReserved 的话，这里会先自旋 64 轮、再永久等待。
+  EXPECT_EQ(timestamps.ReadTimestamp(), TimestampManager::kInitialCounter);
+  EXPECT_EQ(timestamps.counter(), TimestampManager::kInitialCounter);
 }
 
 TEST(TimestampManager, CommitScopesAllocateConsecutiveTimestamps) {

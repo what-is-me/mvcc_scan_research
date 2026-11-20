@@ -11,6 +11,35 @@ namespace {
 // 用户态；超过这个轮数说明持有者被调度出去了，再交给平台的等待原语。
 constexpr int kSpinRoundsBeforeWait = 64;
 
+// 预留态的 RAII：构造时占住槽位，Publish 时发布并解除，析构时仍未发布则
+// 退回空闲。钩子抛出时必须走这条路径——槽位停在"预留"会让所有读者按 §8
+// 的规则永久等待，而 CommitScope 构造未完成时它的析构不会运行。
+class ReservationGuard {
+ public:
+  explicit ReservationGuard(std::atomic<uint64_t>& value) : value_(&value) {
+    value_->store(TimestampManager::kReserved, std::memory_order_release);
+  }
+
+  ~ReservationGuard() {
+    if (published_) return;
+    value_->store(TimestampManager::kIdle, std::memory_order_release);
+    value_->notify_all();
+  }
+
+  ReservationGuard(const ReservationGuard&) = delete;
+  ReservationGuard& operator=(const ReservationGuard&) = delete;
+
+  void Publish(Timestamp commit_ts) {
+    value_->store(commit_ts, std::memory_order_release);
+    value_->notify_all();
+    published_ = true;
+  }
+
+ private:
+  std::atomic<uint64_t>* value_;
+  bool published_ = false;
+};
+
 }  // namespace
 
 TimestampManager::TimestampManager(size_t slot_count, TimestampHooks hooks)
@@ -22,17 +51,16 @@ Timestamp TimestampManager::BeginCommit(size_t slot) {
   assert(slot < slots_.size());
   std::atomic<uint64_t>& value = slots_[slot].value;
 
-  value.store(kReserved, std::memory_order_release);
+  ReservationGuard reservation(value);
   hooks_.Fire(TimestampHookPoint::kWhileReserved);
 
   const Timestamp commit_ts = counter_.fetch_add(1, std::memory_order_acq_rel);
-  value.store(commit_ts, std::memory_order_release);
 
   // 唤醒等在这个槽位上的读者。只有"离开预留态"这一步需要通知：发布之后
   // 它的 commit_ts 已经进入读者的取 min 范围，读者不再需要等它落定。
   // 没有等待者时这次通知在 Linux/Windows 上是一次空转的唤醒系统调用，
   // 相对一次提交的代价（含页 I/O）可以忽略。
-  value.notify_all();
+  reservation.Publish(commit_ts);
   return commit_ts;
 }
 

@@ -323,15 +323,21 @@ class BufferPool {
     replacer_.OnEvict(*victim);
     const PageId victim_page = victim_frame.page_id;
     const bool was_dirty = victim_frame.dirty.load(std::memory_order_acquire);
-    lock.unlock();
 
+    // 写回在锁外进行。它抛出时不能把帧留在淘汰中：页表条目还指着它，
+    // 之后任何 Fix(这一页) 都会等在一个永远不会成立的谓词上。守卫在异常
+    // 路径把帧退回驻留态并重新挂回候选集，正常路径由 Commit 收尾。
+    EvictionGuard guard(*this, *victim, was_dirty);
+
+    lock.unlock();
     hooks_.Fire(PoolHookPoint::kBeforeWriteBack);
     if (was_dirty) {
       file_.WritePage(victim_page, victim_frame.data);
       physical_writes_.fetch_add(1, std::memory_order_relaxed);
     }
-
     lock.lock();
+
+    guard.Commit();
     table_.Erase(victim_page);
 
     // 写回期间别的线程可能已经把这一页装进来了；此时放弃淘汰，帧退还空闲表，
@@ -375,6 +381,41 @@ class BufferPool {
       frames_[index].state.store(FrameState::kFree, std::memory_order_relaxed);
       free_.push_back(index);
     }
+    cv_.notify_all();
+  }
+
+  // 淘汰期间的帧状态守卫。正常路径 Commit 后由调用方继续收尾；异常路径
+  // （写回或写回前的钩子抛出）把帧退回驻留态——否则它永久停在 kEvicting，
+  // 页表条目仍在，之后任何 Fix(这一页) 都会等在一个不可能成立的谓词上。
+  class EvictionGuard {
+   public:
+    EvictionGuard(BufferPool& pool, size_t index, bool dirty)
+        : pool_(&pool), index_(index), dirty_(dirty) {}
+    ~EvictionGuard() {
+      if (!committed_) pool_->AbortEviction(index_, dirty_);
+    }
+
+    EvictionGuard(const EvictionGuard&) = delete;
+    EvictionGuard& operator=(const EvictionGuard&) = delete;
+
+    void Commit() { committed_ = true; }
+
+   private:
+    BufferPool* pool_;
+    size_t index_;
+    bool dirty_;
+    bool committed_ = false;
+  };
+
+  // 写回失败时帧的磁盘副本仍是旧内容，但内存副本完好，退回驻留态是唯一
+  // 自洽的选择：退还空闲表会因为 dirty 而丢掉数据，继续停在淘汰中会挂死。
+  // 异常继续抛给调用方——本系统没有 WAL 与恢复路径（§2），是否终止由上层定。
+  void AbortEviction(size_t index, bool dirty) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    Frame& frame = frames_[index];
+    frame.state.store(FrameState::kResident, std::memory_order_release);
+    frame.dirty.store(dirty, std::memory_order_release);
+    replacer_.OnLoad(index, AccessMode::kNormal);
     cv_.notify_all();
   }
 
