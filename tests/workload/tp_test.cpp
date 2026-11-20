@@ -36,10 +36,10 @@ using BasePool = BufferPool<DirectPageTable, LruReplacer>;
 using UndoPool = BufferPool<FrameHashTable, LruReplacer>;
 
 struct Env {
-  Env()
+  explicit Env(size_t undo_pages = kUndoPages)
       : layout(kPageSize, kRowSize, kTableRows),
         base_file(layout.page_count(), layout.page_size(), test::PageFill::kZero),
-        undo_file(kUndoPages, layout.page_size(), test::PageFill::kZero),
+        undo_file(undo_pages, layout.page_size(), test::PageFill::kZero),
         base(layout, kBaseFrames, base_file, RowLockMode::kAllocate,
              DirectPageTable(layout.page_count()), LruReplacer(kBaseFrames), PoolHooks(), kPrefetch),
         undo(layout, kUndoFrames, undo_file, RowLockMode::kNone, FrameHashTable(kUndoFrames),
@@ -138,12 +138,13 @@ struct ScanSample {
 // commit_ts < read_ts 的提交"后的期望比对。终态 oracle 只能保住最后一步，
 // 读到未提交版本、链头跳过已提交版本这类错误必须靠运行期采样暴露。
 TEST(TpWorkload, MidRunScansMatchReplayOracle) {
-  Env env;
+  // 40000 次更新需要约 2500 页 undo，给到 5000。
+  Env env(5000);
 
   TpConfig config;
   config.threads = 2;
   config.rows_per_txn = 1;
-  config.txns_per_thread = 20000;
+  config.txns_per_thread = 40000;
   config.zipf_theta = 0.8;
   config.mapping = KeyMapping::kScattered;
 
