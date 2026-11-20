@@ -1,4 +1,3 @@
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -179,11 +178,12 @@ TEST(TpWorkload, MidRunScansMatchReplayOracle) {
   ASSERT_GT(outcome.committed, 0u);
   ASSERT_GT(samples.size(), 3u);
 
-  // 快照可能因新的进行中提交而回退，采样顺序不保证 read_ts 单调。
-  std::sort(samples.begin(), samples.end(),
-            [](const ScanSample& left, const ScanSample& right) {
-              return left.read_ts < right.read_ts;
-            });
+  // read_ts 单调不减：counter 单调，新取号的 ts 必 >= 上一个 counter，
+  // 释放只会把最老的进行中项移出集合。采样顺序即回放顺序。
+  for (size_t index = 1; index < samples.size(); ++index) {
+    ASSERT_LE(samples[index - 1].read_ts, samples[index].read_ts)
+        << "ReadTimestamp 返回了回退的快照";
+  }
 
   std::vector<uint64_t> state(env.layout.row_count(), kInitial);
   size_t applied = 0;
