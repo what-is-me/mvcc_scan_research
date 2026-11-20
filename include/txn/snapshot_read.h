@@ -7,6 +7,7 @@
 #include <span>
 
 #include "buffer/frame.h"
+#include "buffer/pin_guard.h"
 #include "common/basic_types.h"
 #include "storage/page.h"
 #include "storage/table_layout.h"
@@ -29,6 +30,7 @@ void ReadVisible(BasePool& base_pool, UndoPool& undo_pool, const TableLayout& la
   UndoRowId cursor = RowId::Null();
   {
     Frame* frame = base_pool.Fix(id.page(), mode);
+    const PinGuard<BasePool> pin(base_pool, frame);
     const Row row = Page(frame->data, layout).RowAt(id.slot());
 
     std::copy(row.data().begin(), row.data().end(), out.begin());
@@ -37,26 +39,21 @@ void ReadVisible(BasePool& base_pool, UndoPool& undo_pool, const TableLayout& la
     std::atomic_thread_fence(std::memory_order_acquire);
     const VersionStamp stamp = row.version();
 
-    if (!stamp.locked() && stamp.timestamp() < read_ts) {
-      base_pool.Unpin(frame);
-      return;
-    }
+    if (!stamp.locked() && stamp.timestamp() < read_ts) return;
 
     cursor = row.undo_row_id();
-    base_pool.Unpin(frame);
   }
 
   // 版本链必然在第一条 ts < read_ts 的记录处终止：链尾是版本戳 0，而 read_ts >= 1。
   for (;;) {
     Frame* frame = undo_pool.Fix(cursor.page(), AccessMode::kNormal);
+    const PinGuard<UndoPool> pin(undo_pool, frame);
     const Row record = Page(frame->data, layout).RowAt(cursor.slot());
     if (record.version().timestamp() < read_ts) {
       std::copy(record.data().begin(), record.data().end(), out.begin());
-      undo_pool.Unpin(frame);
       return;
     }
     cursor = record.undo_row_id();
-    undo_pool.Unpin(frame);
   }
 }
 

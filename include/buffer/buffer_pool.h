@@ -21,6 +21,7 @@
 #include "buffer/pool_hooks.h"
 #include "common/aligned_buffer.h"
 #include "common/fixed_array.h"
+#include "common/scope_exit.h"
 #include "storage/page.h"
 #include "storage/page_file.h"
 #include "storage/table_layout.h"
@@ -127,14 +128,13 @@ class BufferPool {
     if (reserved_count == 0) return 0;
 
     const std::span<std::byte> staging = prefetch_buffer_.span().first(count * layout_.page_size());
-    try {
-      hooks_.Fire(PoolHookPoint::kBeforeFileRead);
-      file_.ReadPages(first, count, staging);
-      hooks_.Fire(PoolHookPoint::kAfterFileRead);
-    } catch (...) {
+    auto release = MakeScopeExit([&] {
       ReleaseReserved(std::span<const size_t>(reserved_scratch_.span().data(), reserved_count));
-      throw;
-    }
+    });
+    hooks_.Fire(PoolHookPoint::kBeforeFileRead);
+    file_.ReadPages(first, count, staging);
+    hooks_.Fire(PoolHookPoint::kAfterFileRead);
+    release.Dismiss();
 
     physical_reads_.fetch_add(count, std::memory_order_relaxed);
     physical_read_ops_.fetch_add(1, std::memory_order_relaxed);
@@ -422,16 +422,13 @@ class BufferPool {
   Frame* LoadInto(size_t index, PageId page, AccessMode mode, LoadSource source) {
     Frame& frame = frames_[index];
     if (source == LoadSource::kFile) {
-      try {
-        hooks_.Fire(PoolHookPoint::kBeforeFileRead);
-        file_.ReadPage(page, frame.data);
-        hooks_.Fire(PoolHookPoint::kAfterFileRead);
-      } catch (...) {
-        // 装载失败必须把占位还回去，否则该页永远停在"载入中"，之后任何 Fix
-        // 都会挂在它上面等下去。
-        AbandonLoad(index, page);
-        throw;
-      }
+      // 装载失败必须把占位还回去，否则该页永远停在"载入中"，之后任何 Fix
+      // 都会挂在它上面等下去。
+      auto abandon = MakeScopeExit([&] { AbandonLoad(index, page); });
+      hooks_.Fire(PoolHookPoint::kBeforeFileRead);
+      file_.ReadPage(page, frame.data);
+      hooks_.Fire(PoolHookPoint::kAfterFileRead);
+      abandon.Dismiss();
       physical_reads_.fetch_add(1, std::memory_order_relaxed);
       physical_read_ops_.fetch_add(1, std::memory_order_relaxed);
     } else {

@@ -9,6 +9,7 @@
 
 #include "common/basic_types.h"
 #include "common/fixed_array.h"
+#include "common/scope_exit.h"
 #include "storage/table_layout.h"
 #include "txn/row_guard.h"
 #include "txn/timestamp_manager.h"
@@ -123,6 +124,9 @@ class Transaction {
   void Commit() {
     assert(active_);
     PinWriteSetPages();
+    // 写集页必须无条件归还：CommitScope 构造抛出时 committed_ 还是 false，
+    // 析构会走 Abort，而 Abort 不碰 pinned_。
+    auto unpin = MakeScopeExit([this] { UnpinWriteSetPages(); });
 
     const CommitScope scope(*timestamps_, slot_);
     committed_ = true;
@@ -142,7 +146,6 @@ class Transaction {
       guard.MarkDirty();
     }
 
-    UnpinWriteSetPages();
     active_ = false;
     committed_ = false;
   }
@@ -166,14 +169,13 @@ class Transaction {
   // 失败时什么都没发布，直接抛出即可，析构会照常回滚。
   void PinWriteSetPages() {
     size_t pinned = 0;
-    try {
-      for (; pinned < context_->size(); ++pinned) {
-        pinned_[pinned] = base_pool_->Fix(context_->row_at(pinned).page(), AccessMode::kNormal);
-      }
-    } catch (...) {
+    auto rollback = MakeScopeExit([&] {
       while (pinned > 0) base_pool_->Unpin(pinned_[--pinned]);
-      throw;
+    });
+    for (; pinned < context_->size(); ++pinned) {
+      pinned_[pinned] = base_pool_->Fix(context_->row_at(pinned).page(), AccessMode::kNormal);
     }
+    rollback.Dismiss();
   }
 
   void UnpinWriteSetPages() {

@@ -10,6 +10,7 @@
 #include <span>
 
 #include "buffer/buffer_pool.h"
+#include "buffer/pin_guard.h"
 #include "common/basic_types.h"
 #include "storage/page.h"
 #include "storage/row.h"
@@ -99,11 +100,11 @@ class TableScanner {
 
       for (size_t index = 0; index < count; ++index) {
         Frame* frame = base_pool_->Fix(static_cast<PageId>(first + index), AccessMode::kScan);
+        const PinGuard<BasePool> pin(*base_pool_, frame);
         const Page page(frame->data, *layout_);
         for (size_t slot = 0; slot < page.row_count(); ++slot) {
           ScanRow(page.RowAt(slot), read_ts, result);
         }
-        base_pool_->Unpin(frame);
       }
     }
 
@@ -137,17 +138,16 @@ class TableScanner {
     for (;;) {
       assert(!cursor.is_null());
       Frame* frame = undo_pool_->Fix(cursor.page(), AccessMode::kNormal);
+      const PinGuard<UndoPool> pin(*undo_pool_, frame);
       const Row record = Page(frame->data, *layout_).RowAt(cursor.slot());
       ++result.chain_hops;
 
       if (record.version().timestamp() < read_ts) {
         result.checksum ^= ChecksumBytes(record.data());
-        undo_pool_->Unpin(frame);
         return;
       }
 
       cursor = record.undo_row_id();
-      undo_pool_->Unpin(frame);
     }
   }
 
