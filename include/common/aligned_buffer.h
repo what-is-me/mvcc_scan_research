@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <new>
 #include <span>
@@ -16,7 +17,11 @@ class AlignedBuffer {
   explicit AlignedBuffer(size_t bytes, size_t alignment = kSectorBytes)
       : size_(bytes),
         alignment_(alignment),
-        data_(static_cast<std::byte*>(::operator new(bytes, std::align_val_t{alignment}))) {}
+        data_(static_cast<std::byte*>(::operator new(bytes, std::align_val_t{alignment}))) {
+    // 非 2 的幂在 ::operator new 的对齐重载里是未定义行为，且不会在调用点
+    // 报错；断言在这里兜住。
+    assert(alignment != 0 && (alignment & (alignment - 1)) == 0);
+  }
 
   ~AlignedBuffer() { ::operator delete(data_, std::align_val_t{alignment_}); }
 

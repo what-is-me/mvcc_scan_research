@@ -5,7 +5,25 @@
 #include <cstdint>
 #include <random>
 
+#include "common/config.h"
+
 namespace mvcc {
+
+// 配置层的键分布 -> Zipf 参数。均匀分布用 theta = 0：公式在 0 处自然退化
+// （zeta 比值为 1、eta 为 1），不需要给生成器另外分支。
+constexpr double ZipfTheta(KeyDist dist) {
+  switch (dist) {
+    case KeyDist::kUniform:
+      return 0.0;
+    case KeyDist::kZipf05:
+      return 0.5;
+    case KeyDist::kZipf08:
+      return 0.8;
+    case KeyDist::kZipf11:
+      return 1.1;
+  }
+  return 0.0;
+}
 
 // YCSB 的近似 Zipf：P(rank) ∝ 1/(rank+1)^theta。返回值落在 [0, item_count)。
 // theta 越大越集中；theta = 1 时逆变换退化（alpha 无定义），不接受。

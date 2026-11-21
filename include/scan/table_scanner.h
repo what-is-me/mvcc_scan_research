@@ -14,15 +14,19 @@
 #include "buffer/buffer_pool.h"
 #include "buffer/pin_guard.h"
 #include "common/basic_types.h"
+#include "common/config.h"
 #include "storage/page.h"
 #include "storage/row.h"
 #include "storage/table_layout.h"
 
 namespace mvcc {
 
-// 扫描策略。baseline 与 hotfirst 在主扫描中就地解析版本链，差的只是页的访问
-// 次序；两种 defer 把走链整体推迟到第二阶段，主扫描只记录链头。
-enum class ScanPolicy : uint8_t { kBaseline, kHotFirst, kDeferChain, kDeferPaged };
+// 配置层的 ScanAccessMode 与池的 AccessMode 枚举项顺序相反（kScan/kNormal
+// 对 kNormal/kScan），按序号 static_cast 会静默反转语义。只保留这一处具名
+// 转换，装配层必须走它。
+inline AccessMode ToAccessMode(ScanAccessMode mode) {
+  return mode == ScanAccessMode::kScan ? AccessMode::kScan : AccessMode::kNormal;
+}
 
 // 扫描的副产品：行数、走链行数、总跳数、可见数据的折叠值，以及本次扫描**自己**
 // 发出的页请求计数（对应结果 JSON 里 details[] 的每扫描字段）。计数由池在调用

@@ -74,5 +74,27 @@ TEST(KeyMapper, HeadIsIdentity) {
   }
 }
 
+// 配置层的四种键分布必须都能落到可用的 theta 上：均匀用 0，公式在 0 处
+// 退化为等概率，不需要给生成器另开分支。
+TEST(ZipfGenerator, EveryConfiguredDistributionProducesAUsableTheta) {
+  EXPECT_DOUBLE_EQ(ZipfTheta(KeyDist::kUniform), 0.0);
+  EXPECT_DOUBLE_EQ(ZipfTheta(KeyDist::kZipf05), 0.5);
+  EXPECT_DOUBLE_EQ(ZipfTheta(KeyDist::kZipf08), 0.8);
+  EXPECT_DOUBLE_EQ(ZipfTheta(KeyDist::kZipf11), 1.1);
+
+  constexpr uint64_t kRows = 64;
+  ZipfGenerator uniform(kRows, ZipfTheta(KeyDist::kUniform), 1);
+  std::vector<size_t> counts(kRows, 0);
+  for (size_t draw = 0; draw < 64'000; ++draw) {
+    ++counts[uniform.Next()];
+  }
+
+  // 均匀分布下每个 rank 的期望是 1000 次，允许 ±30% 的采样波动。
+  for (const size_t count : counts) {
+    EXPECT_GT(count, 700u);
+    EXPECT_LT(count, 1300u);
+  }
+}
+
 }  // namespace
 }  // namespace mvcc

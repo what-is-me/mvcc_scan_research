@@ -7,12 +7,9 @@
 #include <random>
 #include <vector>
 
-namespace mvcc {
+#include "common/config.h"
 
-enum class KeyMapping {
-  kScattered,
-  kHead,
-};
+namespace mvcc {
 
 // 逻辑热点排名 -> 物理行号。scattered 用固定种子的置换表把热点均匀打散到全表：
 // 直接映射会让 Zipf 把竞争压到表头几页，行锁与写冲突全部集中在那里（§11）。

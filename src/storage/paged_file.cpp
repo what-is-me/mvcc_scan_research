@@ -55,6 +55,26 @@ void CheckBufferAlignment(std::span<const std::byte> buffer) {
   }
 }
 
+#ifndef _WIN32
+// 无缓冲 I/O 不能分段重试：缓冲区地址、传输长度、文件偏移三者都必须按扇区
+// 对齐，一次短传输之后 done 不再是扇区倍数，下一轮三个条件同时失配，只会
+// 换回 EINVAL。所以整页请求一次发完，短传输交给调用方当硬错误报出来。
+// EINTR 是唯一值得重发的失败：它一个字节都没搬走，原样重试安全。
+ssize_t ReadFully(int fd, std::byte* dst, size_t bytes, uint64_t offset) {
+  for (;;) {
+    const ssize_t got = ::pread(fd, dst, bytes, static_cast<off_t>(offset));
+    if (got >= 0 || errno != EINTR) return got;
+  }
+}
+
+ssize_t WriteFully(int fd, const std::byte* src, size_t bytes, uint64_t offset) {
+  for (;;) {
+    const ssize_t put = ::pwrite(fd, src, bytes, static_cast<off_t>(offset));
+    if (put >= 0 || errno != EINTR) return put;
+  }
+}
+#endif
+
 }  // namespace
 
 void RemoveFileIfExists(const std::filesystem::path& path) {
@@ -109,24 +129,25 @@ void PagedFile::ReadPage(PageId page, std::span<std::byte> dst) {
   DWORD read = 0;
   if (::ReadFile(static_cast<HANDLE>(handle_), dst.data(), expected, &read, &overlapped) == 0) {
     const IoFailure failure = IoFailure::Capture();
+    // 越过文件尾在同步句柄上不是短传输而是 ERROR_HANDLE_EOF。两种平台统一
+    // 报成 short transfer，调用方只需要处理一种"没读够"的语义。
+    if (failure.code == ERROR_HANDLE_EOF) {
+      ThrowShortTransfer("cannot read page " + std::to_string(page), path_, read, expected);
+    }
     ThrowIoError(failure, "cannot read page " + std::to_string(page), path_);
   }
   if (read != expected) {
     ThrowShortTransfer("cannot read page " + std::to_string(page), path_, read, expected);
   }
 #else
-  size_t done = 0;
-  while (done < page_size_) {
-    const ssize_t got =
-        ::pread(fd_, dst.data() + done, page_size_ - done, static_cast<off_t>(offset + done));
-    if (got < 0) {
-      const IoFailure failure = IoFailure::Capture();
-      ThrowIoError(failure, "cannot read page " + std::to_string(page), path_);
-    }
-    if (got == 0) {
-      ThrowShortTransfer("cannot read page " + std::to_string(page), path_, done, page_size_);
-    }
-    done += static_cast<size_t>(got);
+  const ssize_t got = ReadFully(fd_, dst.data(), page_size_, offset);
+  if (got < 0) {
+    const IoFailure failure = IoFailure::Capture();
+    ThrowIoError(failure, "cannot read page " + std::to_string(page), path_);
+  }
+  if (got != static_cast<ssize_t>(page_size_)) {
+    ThrowShortTransfer("cannot read page " + std::to_string(page), path_,
+                       static_cast<size_t>(got), page_size_);
   }
 #endif
 }
@@ -146,24 +167,23 @@ void PagedFile::ReadPages(PageId first, size_t count, std::span<std::byte> dst) 
   DWORD read = 0;
   if (::ReadFile(static_cast<HANDLE>(handle_), dst.data(), expected, &read, &overlapped) == 0) {
     const IoFailure failure = IoFailure::Capture();
+    if (failure.code == ERROR_HANDLE_EOF) {
+      ThrowShortTransfer("cannot read pages from " + std::to_string(first), path_, read, expected);
+    }
     ThrowIoError(failure, "cannot read pages from " + std::to_string(first), path_);
   }
   if (read != expected) {
     ThrowShortTransfer("cannot read pages from " + std::to_string(first), path_, read, expected);
   }
 #else
-  size_t done = 0;
-  while (done < bytes) {
-    const ssize_t got =
-        ::pread(fd_, dst.data() + done, bytes - done, static_cast<off_t>(offset + done));
-    if (got < 0) {
-      const IoFailure failure = IoFailure::Capture();
-      ThrowIoError(failure, "cannot read pages from " + std::to_string(first), path_);
-    }
-    if (got == 0) {
-      ThrowShortTransfer("cannot read pages from " + std::to_string(first), path_, done, bytes);
-    }
-    done += static_cast<size_t>(got);
+  const ssize_t got = ReadFully(fd_, dst.data(), bytes, offset);
+  if (got < 0) {
+    const IoFailure failure = IoFailure::Capture();
+    ThrowIoError(failure, "cannot read pages from " + std::to_string(first), path_);
+  }
+  if (got != static_cast<ssize_t>(bytes)) {
+    ThrowShortTransfer("cannot read pages from " + std::to_string(first), path_,
+                       static_cast<size_t>(got), bytes);
   }
 #endif
 }
@@ -187,18 +207,14 @@ void PagedFile::WritePage(PageId page, std::span<const std::byte> src) {
     ThrowShortTransfer("cannot write page " + std::to_string(page), path_, written, expected);
   }
 #else
-  size_t done = 0;
-  while (done < page_size_) {
-    const ssize_t put =
-        ::pwrite(fd_, src.data() + done, page_size_ - done, static_cast<off_t>(offset + done));
-    if (put < 0) {
-      const IoFailure failure = IoFailure::Capture();
-      ThrowIoError(failure, "cannot write page " + std::to_string(page), path_);
-    }
-    if (put == 0) {
-      ThrowShortTransfer("cannot write page " + std::to_string(page), path_, done, page_size_);
-    }
-    done += static_cast<size_t>(put);
+  const ssize_t put = WriteFully(fd_, src.data(), page_size_, offset);
+  if (put < 0) {
+    const IoFailure failure = IoFailure::Capture();
+    ThrowIoError(failure, "cannot write page " + std::to_string(page), path_);
+  }
+  if (put != static_cast<ssize_t>(page_size_)) {
+    ThrowShortTransfer("cannot write page " + std::to_string(page), path_,
+                       static_cast<size_t>(put), page_size_);
   }
 #endif
 }

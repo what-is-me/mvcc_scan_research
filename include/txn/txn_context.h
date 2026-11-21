@@ -11,10 +11,17 @@
 
 namespace mvcc {
 
-// 事务的工作内存：read_ts + 写集。池化复用，事务开始时 Reset。
+struct Frame;
+
+// 事务的工作内存：read_ts + 写集 + 提交时按写集顺序 pin 住的帧。池化复用，
+// 事务开始时 Reset。
 //
 // 写集条目只存行定位与新数据；旧值已经写进 undo 记录，不需要再缓存原
 // undo_row_id——回滚不恢复链头（§9.5）。
+//
+// pin 数组放在这里而不是 Transaction 里：Transaction 每事务构造一次，数组
+// 跟着它走就是每事务一次 malloc，违反热路径零分配（§3）。context 是池化的，
+// 数组随它一次性分配、跨事务复用。
 class TxnContext {
  public:
   static constexpr size_t kNoEntry = static_cast<size_t>(-1);
@@ -23,7 +30,8 @@ class TxnContext {
       : max_rows_(max_rows),
         data_size_(data_size),
         entries_(max_rows),
-        data_(max_rows * data_size) {}
+        data_(max_rows * data_size),
+        pinned_(max_rows) {}
 
   void Reset() {
     size_ = 0;
@@ -67,6 +75,9 @@ class TxnContext {
     return size_++;
   }
 
+  // 提交时逐行 pin 住写集页，避免取号之后还要等页装载。长度等于 capacity()。
+  std::span<Frame*> pinned_frames() { return pinned_.span(); }
+
  private:
   struct Entry {
     RowId row;
@@ -76,6 +87,7 @@ class TxnContext {
   size_t data_size_;
   FixedArray<Entry> entries_;
   std::vector<std::byte> data_;
+  FixedArray<Frame*> pinned_;
   size_t size_ = 0;
   Timestamp read_ts_ = 0;
 };

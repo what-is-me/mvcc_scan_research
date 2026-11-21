@@ -7,10 +7,12 @@
 
 namespace mvcc {
 
+// 实验维度的枚举只有这一份定义。扫描器、负载层、替换策略都从这里取，
+// 各自另立一份会在装配层（同一 TU 同时包含配置与实现头）直接编译失败。
 enum class KeyDist { kUniform, kZipf05, kZipf08, kZipf11 };
 enum class KeyMapping { kScattered, kHead };
 enum class ScanAccessMode { kScan, kNormal };
-enum class ScanPolicy { kBaseline, kHotfirst, kDeferChain, kDeferPaged };
+enum class ScanPolicy { kBaseline, kHotFirst, kDeferChain, kDeferPaged };
 enum class Replacer { kLru, kClock, kMru, kArc, kLruK };
 
 const char* ToString(KeyDist value);

@@ -6,9 +6,9 @@
 #include <exception>
 #include <ostream>
 #include <span>
+#include <stdexcept>
 
 #include "common/basic_types.h"
-#include "common/fixed_array.h"
 #include "common/scope_exit.h"
 #include "storage/table_layout.h"
 #include "txn/row_guard.h"
@@ -46,8 +46,7 @@ class Transaction {
         appender_(&appender),
         timestamps_(&timestamps),
         slot_(slot),
-        context_(&context),
-        pinned_(context.capacity()) {}
+        context_(&context) {}
 
   ~Transaction() {
     if (!active_) return;
@@ -125,7 +124,7 @@ class Transaction {
     assert(active_);
     PinWriteSetPages();
     // 写集页必须无条件归还：CommitScope 构造抛出时 committed_ 还是 false，
-    // 析构会走 Abort，而 Abort 不碰 pinned_。
+    // 析构会走 Abort，而 Abort 不归还写集页。
     auto unpin = MakeScopeExit([this] { UnpinWriteSetPages(); });
 
     const CommitScope scope(*timestamps_, slot_);
@@ -168,18 +167,26 @@ class Transaction {
   // 把写集涉及的页全部装入并 pin 住。可能触发缺页读，也可能等待淘汰；这一步
   // 失败时什么都没发布，直接抛出即可，析构会照常回滚。
   void PinWriteSetPages() {
-    size_t pinned = 0;
+    // 写集页数超过池容量时，这些 pin 会互相等待：每个事务都攥着一部分帧，
+    // 谁也拿不到下一页。这是配置错误而不是运行时状况，直接拒绝，不要挂住。
+    if (context_->size() > base_pool_->frame_count()) {
+      throw std::runtime_error("write set larger than base pool");
+    }
+
+    const std::span<Frame*> pinned = context_->pinned_frames();
+    size_t count = 0;
     auto rollback = MakeScopeExit([&] {
-      while (pinned > 0) base_pool_->Unpin(pinned_[--pinned]);
+      while (count > 0) base_pool_->Unpin(pinned[--count]);
     });
-    for (; pinned < context_->size(); ++pinned) {
-      pinned_[pinned] = base_pool_->Fix(context_->row_at(pinned).page(), AccessMode::kNormal);
+    for (; count < context_->size(); ++count) {
+      pinned[count] = base_pool_->Fix(context_->row_at(count).page(), AccessMode::kNormal);
     }
     rollback.Dismiss();
   }
 
   void UnpinWriteSetPages() {
-    for (size_t index = 0; index < context_->size(); ++index) base_pool_->Unpin(pinned_[index]);
+    const std::span<Frame*> pinned = context_->pinned_frames();
+    for (size_t index = 0; index < context_->size(); ++index) base_pool_->Unpin(pinned[index]);
   }
 
   BasePool* base_pool_;
@@ -189,7 +196,6 @@ class Transaction {
   TimestampManager* timestamps_;
   size_t slot_;
   TxnContext* context_;
-  FixedArray<Frame*> pinned_;
   Timestamp commit_ts_ = 0;
   bool active_ = false;
   bool committed_ = false;

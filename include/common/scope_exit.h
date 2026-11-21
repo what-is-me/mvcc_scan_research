@@ -1,5 +1,6 @@
 #pragma once
 
+#include <exception>
 #include <utility>
 
 namespace mvcc {
@@ -10,8 +11,17 @@ template <typename F>
 class ScopeExit {
  public:
   explicit ScopeExit(F action) : action_(std::move(action)) {}
-  ~ScopeExit() {
-    if (active_) action_();
+
+  // 回滚动作不允许抛出：这个析构本身可能正在栈展开中运行，抛出去就是
+  // terminate，而且此时已经没有第二次补救机会。这里接住并显式终止，让崩溃
+  // 语义是确定的，而不是由运行时无诊断地杀进程。调用方要保证动作不抛。
+  ~ScopeExit() noexcept {
+    if (!active_) return;
+    try {
+      action_();
+    } catch (...) {
+      std::terminate();
+    }
   }
 
   ScopeExit(const ScopeExit&) = delete;

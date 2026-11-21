@@ -188,6 +188,13 @@ TEST(Config, ValidateRejectsTinyRowAndMisalignedRow) {
   config.row_size_b = 8;
   EXPECT_NE(config.Validate().find("16-byte"), std::string::npos);
 
+  // 16 是头长本身：数据区为空，ChecksumBytes 对任何内容都返回 0。
+  config.row_size_b = 16;
+  EXPECT_NE(config.Validate().find("8 bytes of row data"), std::string::npos);
+
+  config.row_size_b = 24;
+  EXPECT_EQ(config.Validate(), "");
+
   config.row_size_b = 100;
   EXPECT_NE(config.Validate().find("multiple of 8"), std::string::npos);
 }
@@ -235,7 +242,7 @@ TEST(Config, EnumNamesMatchExperimentOutput) {
   EXPECT_STREQ(ToString(ScanAccessMode::kScan), "scan");
   EXPECT_STREQ(ToString(ScanAccessMode::kNormal), "normal");
   EXPECT_STREQ(ToString(ScanPolicy::kBaseline), "baseline");
-  EXPECT_STREQ(ToString(ScanPolicy::kHotfirst), "hotfirst");
+  EXPECT_STREQ(ToString(ScanPolicy::kHotFirst), "hotfirst");
   EXPECT_STREQ(ToString(ScanPolicy::kDeferChain), "defer_chain");
   EXPECT_STREQ(ToString(ScanPolicy::kDeferPaged), "defer_paged");
   EXPECT_STREQ(ToString(Replacer::kLru), "lru");

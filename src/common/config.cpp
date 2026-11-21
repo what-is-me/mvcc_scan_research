@@ -62,7 +62,7 @@ constexpr EnumEntry<ScanAccessMode> kScanAccessModeEntries[] = {
 
 constexpr EnumEntry<ScanPolicy> kScanPolicyEntries[] = {
     {"baseline", ScanPolicy::kBaseline},
-    {"hotfirst", ScanPolicy::kHotfirst},
+    {"hotfirst", ScanPolicy::kHotFirst},
     {"defer_chain", ScanPolicy::kDeferChain},
     {"defer_paged", ScanPolicy::kDeferPaged},
 };
@@ -190,6 +190,11 @@ bool Config::Set(std::string_view key, std::string_view value, std::string* erro
 std::string Config::Validate() const {
   if (page_size_kb == 0) return "page_size_kb must be positive";
   if (row_size_b < kRowHeaderBytes) return "row_size_b must hold a 16-byte row header";
+  // 数据区至少要放一个折叠字。行宽恰好等于头长时数据区为空，校验和对任何
+  // 内容都相同，正确性 oracle 直接失效——这种配置必须启动即拒。
+  if (row_size_b < kRowHeaderBytes + sizeof(uint64_t)) {
+    return "row_size_b must leave at least 8 bytes of row data";
+  }
   if (row_size_b % 8 != 0) return "row_size_b must be a multiple of 8";
   if (table_rows == 0) return "table_rows must be positive";
 
