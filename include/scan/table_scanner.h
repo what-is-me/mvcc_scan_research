@@ -4,6 +4,7 @@
 #include <atomic>
 #include <bit>
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -39,6 +40,11 @@ struct ScanResult {
   uint64_t checksum = 0;
   PoolStats base_stats;
   PoolStats undo_stats;
+  // 两段耗时（毫秒）。baseline / hotfirst 只有主扫描，resolve_ms 恒为 0；
+  // defer 的主扫描与解析分别累计。计时放在这里而不是装配层：defer 的两段
+  // 在扫描器内部才分得开，让每个调用点各自夹时钟只会复制同一段逻辑。
+  double main_scan_ms = 0.0;
+  double resolve_ms = 0.0;
 };
 
 // defer 的两阶段形态。分开暴露是为了能分别计时：把 undo 访问推迟并批量化
@@ -49,6 +55,27 @@ struct DeferredScan {
 };
 
 namespace scan_detail {
+
+// 计时口径统一到一处，免得各自用 duration_cast 时把单位写错。
+inline double ElapsedMs(std::chrono::steady_clock::time_point started) {
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+      .count();
+}
+
+// 冷段 = 全部页号 − 快照集合。两份都升序，一次归并即可。快照里重复的页号
+// 顺手跳过：漏跳会让某页既留在热段、又被冷段扫一遍，XOR 折叠会把它抹掉。
+inline void BuildColdPages(std::span<const PageId> hot, size_t page_count,
+                           std::vector<PageId>& cold) {
+  size_t next_hot = 0;
+  for (size_t page = 0; page < page_count; ++page) {
+    while (next_hot < hot.size() && hot[next_hot] < page) ++next_hot;
+    if (next_hot < hot.size() && hot[next_hot] == page) {
+      ++next_hot;
+      continue;
+    }
+    cold.push_back(static_cast<PageId>(page));
+  }
+}
 
 // 四个累加器打散依赖链：逐字串行 XOR 会卡在每字一拍的延迟上。
 template <typename LoadWord>
@@ -146,7 +173,9 @@ class TableScanner {
 
   ScanResult ScanBaseline(Timestamp read_ts) {
     ScanResult result;
+    const auto started = std::chrono::steady_clock::now();
     ScanTable(result, [this, read_ts, &result](Row row) { ScanRow(row, read_ts, result); });
+    result.main_scan_ms = scan_detail::ElapsedMs(started);
     return result;
   }
 
@@ -155,6 +184,9 @@ class TableScanner {
   // 状态，冷热划分就退化成随机。快照允许近似——并发淘汰只让某一页从热段掉到
   // 冷段，扫到时重新装入，正确性不受影响。
   ScanResult ScanHotFirst(Timestamp read_ts) {
+    const auto started = std::chrono::steady_clock::now();
+    ScanResult result;
+
     std::vector<PageId> hot;
     hot.reserve(base_pool_->frame_count());
     base_pool_->CollectResidentPages(hot);
@@ -163,22 +195,13 @@ class TableScanner {
     // 而 Fix 一个越界页会直接读到文件尾抛异常。
     std::erase_if(hot, [this](PageId page) { return page >= layout_->page_count(); });
 
-    ScanResult result;
     ScanPages(hot, read_ts, result);
 
     std::vector<PageId> cold;
-    // 快照可能含重复页（页表本不该有，但近似快照不依赖这个前提），
-    // 按页数上界预留，避免 hot.size() 异常时下溢。
     cold.reserve(layout_->page_count());
-    size_t next_hot = 0;
-    for (size_t page = 0; page < layout_->page_count(); ++page) {
-      if (next_hot < hot.size() && hot[next_hot] == page) {
-        ++next_hot;
-        continue;
-      }
-      cold.push_back(static_cast<PageId>(page));
-    }
+    scan_detail::BuildColdPages(hot, layout_->page_count(), cold);
     ScanPages(cold, read_ts, result);
+    result.main_scan_ms = scan_detail::ElapsedMs(started);
     return result;
   }
 
@@ -186,19 +209,23 @@ class TableScanner {
   // 换成"记录重读后的链头"。全程不触碰 undo 池。
   DeferredScan ScanDeferMain(Timestamp read_ts) {
     DeferredScan scan;
+    const auto started = std::chrono::steady_clock::now();
     ScanTable(scan.result, [this, read_ts, &scan](Row row) {
       ScanRowDefer(row, read_ts, scan.result, scan.pending);
     });
+    scan.result.main_scan_ms = scan_detail::ElapsedMs(started);
     return scan;
   }
 
   // defer 第二阶段：每条链独立回溯。页访问次序由链的自然顺序决定，同一页会被
   // 不同链反复装入——这是"链式"作为对照组的代价。
   void ResolveDeferredChain(DeferredScan& scan, Timestamp read_ts) {
+    const auto started = std::chrono::steady_clock::now();
     for (const UndoRowId cursor : scan.pending) {
       ResolveChain(cursor, read_ts, scan.result);
     }
     scan.pending.clear();
+    scan.result.resolve_ms += scan_detail::ElapsedMs(started);
   }
 
   // defer 第二阶段：把待解析的链头按 undo 页号分桶，每桶只装入一次，页内批量
@@ -209,6 +236,7 @@ class TableScanner {
   // 安全性来自 undo 记录不可变且只追加：主扫描记录链头之后链可能继续增长，
   // 但已存在的节点不变，回溯的终止条件也不受影响。
   void ResolveDeferredPaged(DeferredScan& scan, Timestamp read_ts) {
+    const auto started = std::chrono::steady_clock::now();
     std::vector<UndoRowId> pending = std::move(scan.pending);
     std::vector<UndoRowId> next;
 
@@ -249,6 +277,7 @@ class TableScanner {
       pending.swap(next);
     }
     scan.pending.clear();
+    scan.result.resolve_ms += scan_detail::ElapsedMs(started);
   }
 
  private:

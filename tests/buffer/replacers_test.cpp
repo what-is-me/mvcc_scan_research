@@ -281,5 +281,33 @@ TEST(ClockReplacer, HasEvictableSkipsPinnedAndEvictingFrames) {
   EXPECT_FALSE(clock.HasEvictable(frames));
 }
 
+// 幽灵命中后要装入的页往往正是最老的幽灵，本轮 PushGhost 的容量清理会把
+// 它摘掉；OnLoad 再查 ghost_ 就会当成首次装入、退回 T1。层位必须用 OnMiss
+// 那一刻的判定。
+TEST(ArcReplacer, GhostHitSurvivesCapacityCleanupDuringTheSameMiss) {
+  std::vector<Frame> frames = ResidentFrames(2);
+  ArcReplacer arc(2, 8);  // 幽灵上限 = 帧数 = 2
+
+  // B2 = [P1, P0]（P0 在最老端），B1 为空。
+  arc.OnLoad(0, PageId{0}, AccessMode::kNormal);
+  arc.OnHit(0, PageId{0}, AccessMode::kNormal);
+  arc.OnEvict(0, PageId{0});
+  arc.OnLoad(0, PageId{1}, AccessMode::kNormal);
+  arc.OnHit(0, PageId{1}, AccessMode::kNormal);
+  arc.OnEvict(0, PageId{1});
+
+  // 命中 B2 里最老的 P0：调整 p，并记下这次是幽灵命中。
+  arc.OnMiss(PageId{0});
+
+  // 淘汰一帧时 PushGhost 把幽灵总数推到 3，超过上限，清理较长链（B2）的尾，
+  // 正好是 P0。
+  arc.OnEvict(0, PageId{7});
+
+  arc.OnLoad(0, PageId{0}, AccessMode::kNormal);
+
+  EXPECT_EQ(arc.t2_size(), 1u);
+  EXPECT_EQ(arc.t1_size(), 0u);
+}
+
 }  // namespace
 }  // namespace mvcc

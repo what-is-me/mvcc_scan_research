@@ -199,6 +199,19 @@ TEST(Config, ValidateRejectsTinyRowAndMisalignedRow) {
   EXPECT_NE(config.Validate().find("multiple of 8"), std::string::npos);
 }
 
+// 提交时逐行 pin 写集页。写集比池还大时，多个事务会各自攥着一部分帧等
+// 下一页，谁也放不掉；这是配置错误，必须在启动期拒绝，而不是跑到一半挂住。
+TEST(Config, ValidateRejectsWriteSetLargerThanBasePool) {
+  Config config;
+  config.page_size_kb = 64;
+  config.base_pool_mb = 1;  // 16 帧
+  config.rows_per_txn = 16;
+  EXPECT_EQ(config.Validate(), "");
+
+  config.rows_per_txn = 17;
+  EXPECT_NE(config.Validate().find("base pool frame count"), std::string::npos);
+}
+
 TEST(Config, ValidateRejectsZeroThreadsAndInterval) {
   Config config;
   config.tp_threads = 0;

@@ -441,6 +441,38 @@ TEST(TableScanner, LeavesTheCursorAloneWhenTheBaseVersionIsVisible) {
   EXPECT_TRUE(cursor.is_null());
 }
 
+// 两段耗时是 details[] 的两个字段，必须真的有人产出：baseline/hotfirst 只有
+// 主扫描，resolve_ms 恒为 0；defer 的两段分别累计。
+TEST(TableScanner, ReportsTwoStageTimings) {
+  Env env;
+  FillDerivedRows(env);
+
+  const Timestamp read_ts = env.timestamps.ReadTimestamp();
+  const std::vector<std::byte> updated(env.layout.data_size(), std::byte{0x44});
+  UpdateRow(env, RowId::Make(2, 3), updated, /*commit=*/true);
+
+  const ScanResult baseline = env.scanner.Scan(read_ts, ScanPolicy::kBaseline);
+  EXPECT_GT(baseline.main_scan_ms, 0.0);
+  EXPECT_EQ(baseline.resolve_ms, 0.0);
+
+  DeferredScan deferred = env.scanner.ScanDeferMain(read_ts);
+  EXPECT_EQ(deferred.result.chain_rows, 1u);
+  EXPECT_GT(deferred.result.main_scan_ms, 0.0);
+  EXPECT_EQ(deferred.result.resolve_ms, 0.0);
+
+  env.scanner.ResolveDeferredChain(deferred, read_ts);
+  EXPECT_GT(deferred.result.resolve_ms, 0.0);
+}
+
+// 快照里出现重复页号时，冷段归并不能漏页：漏掉的话该页既留在热段又被
+// 冷段扫一遍，XOR 折叠会把它静默抹掉。
+TEST(TableScanner, ColdSegmentSkipsDuplicatesInTheSnapshot) {
+  const std::vector<PageId> hot = {2, 2, 2, 3};
+  std::vector<PageId> cold;
+  scan_detail::BuildColdPages(hot, 6, cold);
+  EXPECT_EQ(cold, (std::vector<PageId>{0, 1, 4, 5}));
+}
+
 TEST(TableScanner, ChecksumIsDeterministicAndSensitive) {
   const std::vector<std::byte> first(kRowSize - kRowHeaderSize, std::byte{0x01});
 

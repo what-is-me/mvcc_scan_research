@@ -170,6 +170,8 @@ void ArcReplacer::OnHit(size_t frame, PageId, AccessMode mode) {
 // adapted_ 保证每出一条幽灵只调整一次。
 void ArcReplacer::OnMiss(PageId page) {
   const uint8_t which = page < ghost_.size() ? ghost_[page] : 0;
+  // 每次缺页都重新记录，异常路径残留的判定不会被下一次误用。
+  pending_page_ = which == 0 ? kNoGhost : page;
   if (which == 0 || adapted_[page]) return;
   adapted_[page] = true;
 
@@ -184,12 +186,15 @@ void ArcReplacer::OnMiss(PageId page) {
 }
 
 void ArcReplacer::OnLoad(size_t frame, PageId page, AccessMode mode) {
-  // p 已经在 OnMiss 里调过，这里只负责把页从幽灵链摘下、装回 T2。
-  const uint8_t which = page < ghost_.size() ? ghost_[page] : 0;
-  if (which != 0) RemoveGhost(page);
+  // p 已经在 OnMiss 里调过，这里只负责把页从幽灵链摘下、定层。层位用
+  // OnMiss 记下的判定：本轮 PushGhost 的容量清理可能已经摘掉了这条幽灵，
+  // 再查 ghost_ 会把幽灵命中误判成首次装入。
+  const bool ghost_hit = page == pending_page_;
+  pending_page_ = kNoGhost;
+  if (page < ghost_.size() && ghost_[page] != 0) RemoveGhost(page);
 
   Remove(tier_[frame], frame);
-  PushFront(which == 0 ? Tier::kT1 : Tier::kT2, frame);
+  PushFront(ghost_hit ? Tier::kT2 : Tier::kT1, frame);
   cold_[frame] = mode == AccessMode::kScan;
 }
 

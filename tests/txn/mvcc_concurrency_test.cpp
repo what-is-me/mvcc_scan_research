@@ -96,6 +96,37 @@ uint64_t ExpectedChecksum(const std::vector<uint32_t>& state, size_t data_size) 
   return checksum;
 }
 
+// first-updater-wins 必须由这里显式覆盖：靠调度去撞冲突并不可靠（单事务只有
+// 几微秒，四个线程可能整段跑在同一个时间片里完全串行）。两个事务在同一行上
+// 前后脚开始，read_ts 相同，先到的置锁，后到的必须被拒。
+TEST(MvccConcurrency, UpdateRejectsASecondWriterOfTheSameRow) {
+  Env env;
+
+  TxnContext context_a(1, env.layout.data_size());
+  TxnContext context_b(1, env.layout.data_size());
+  UndoAppender appender_a(env.allocator, env.layout);
+  UndoAppender appender_b(env.allocator, env.layout);
+
+  Txn first(env.base, env.undo, env.layout, appender_a, env.timestamps, 0, context_a);
+  Txn second(env.base, env.undo, env.layout, appender_b, env.timestamps, 1, context_b);
+
+  first.Begin();
+  second.Begin();
+
+  const RowId row = env.layout.RowIdAt(7);
+  ASSERT_EQ(first.Update(row, ValueFor(1, env.layout.data_size())), UpdateOutcome::kApplied);
+  EXPECT_EQ(second.Update(row, ValueFor(2, env.layout.data_size())), UpdateOutcome::kConflict);
+
+  first.Commit();
+  second.Abort();
+
+  // 冲突方没有写入任何行版本，提交方那一个版本必须还在。
+  const ScanResult result = env.scanner.ScanBaseline(env.timestamps.ReadTimestamp());
+  std::vector<uint32_t> state(kTableRows, kInitial);
+  state[7] = 1;
+  EXPECT_EQ(result.checksum, ExpectedChecksum(state, env.layout.data_size()));
+}
+
 TEST(MvccConcurrency, ConcurrentUpdatesAndScansMatchReplayOracle) {
   Env env;
 
@@ -129,6 +160,9 @@ TEST(MvccConcurrency, ConcurrentUpdatesAndScansMatchReplayOracle) {
 
         const std::lock_guard<std::mutex> guard(log_mutex);
         log.push_back(CommitRecord{txn.commit_ts(), row, serial});
+        // 单事务只有几微秒，整个循环可能落在一个调度时间片里，四个线程完全
+        // 串行——那样永远撞不出冲突。让出一次，保证线程真的交错。
+        std::this_thread::yield();
       }
     });
   }

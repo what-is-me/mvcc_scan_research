@@ -35,6 +35,9 @@ class ArcReplacer {
   std::optional<size_t> SelectVictim(PageId page, std::span<const Frame> frames) const;
   bool HasEvictable(std::span<const Frame> frames) const;
 
+  size_t t1_size() const { return t1_size_; }
+  size_t t2_size() const { return t2_size_; }
+
  private:
   enum class Tier : uint8_t { kNone, kT1, kT2 };
 
@@ -53,6 +56,11 @@ class ArcReplacer {
   size_t t2_tail_ = kNoFrame;
   size_t t1_size_ = 0;
   size_t t2_size_ = 0;
+
+  // OnMiss 判定出的"本次缺页命中了幽灵"。幽灵条目可能在本轮 PushGhost 的
+  // 容量清理中被摘掉——要装入的页常常正是最老的幽灵——OnLoad 再查 ghost_
+  // 就会把它当成首次装入、退回 T1，层位白白退化一次。
+  PageId pending_page_ = kNoGhost;
 
   FixedArray<uint8_t> ghost_;
   FixedArray<PageId> ghost_prev_;

@@ -75,15 +75,20 @@ class UndoAppender {
   // 而不是读文件；两种情况都可能发生 I/O 或等待，因此必须在行 mutex 之外调用。
   template <typename Pool>
   UndoReservation<Pool> Reserve(Pool& pool) {
+    // 局部分量：Fix 可能抛（淘汰脏帧写回失败）。成员必须等它成功之后再推进，
+    // 否则 page_ 会指向一个从未落盘的页号，下一次 Reserve 走 Fix 去读文件尾，
+    // 这个线程就永久写不了 undo 了。
+    PageId page = page_;
+    size_t slot = next_slot_;
     bool fresh = false;
-    if (page_ == kNoUndoPage || next_slot_ == layout_->rows_per_page()) {
-      page_ = allocator_->Allocate();
-      next_slot_ = 0;
+    if (page == kNoUndoPage || slot == layout_->rows_per_page()) {
+      page = allocator_->Allocate();
+      slot = 0;
       fresh = true;
     }
 
-    Frame* frame = fresh ? pool.FixEmpty(page_, AccessMode::kNormal)
-                         : pool.Fix(page_, AccessMode::kNormal);
+    Frame* frame = fresh ? pool.FixEmpty(page, AccessMode::kNormal)
+                         : pool.Fix(page, AccessMode::kNormal);
 
     // 新分配的页在文件里还不存在。FixEmpty 只零填充内存帧；若这一页的首条
     // 记录因写冲突被放弃，帧会一直是干净的，淘汰时不写回，文件里就永远缺这
@@ -91,9 +96,11 @@ class UndoAppender {
     // 标脏，保证它在淘汰时落盘。
     if (fresh) pool.MarkDirty(frame);
 
-    const size_t slot = next_slot_++;
+    page_ = page;
+    next_slot_ = slot + 1;
+
     assert(slot <= std::numeric_limits<SlotId>::max());
-    const UndoRowId id = UndoRowId::Make(page_, static_cast<SlotId>(slot));
+    const UndoRowId id = UndoRowId::Make(page, static_cast<SlotId>(slot));
     return UndoReservation<Pool>(pool, frame, Page(frame->data, *layout_).RowAt(slot), id);
   }
 

@@ -15,13 +15,7 @@ inline constexpr size_t kSectorBytes = 4096;
 class AlignedBuffer {
  public:
   explicit AlignedBuffer(size_t bytes, size_t alignment = kSectorBytes)
-      : size_(bytes),
-        alignment_(alignment),
-        data_(static_cast<std::byte*>(::operator new(bytes, std::align_val_t{alignment}))) {
-    // 非 2 的幂在 ::operator new 的对齐重载里是未定义行为，且不会在调用点
-    // 报错；断言在这里兜住。
-    assert(alignment != 0 && (alignment & (alignment - 1)) == 0);
-  }
+      : size_(bytes), alignment_(alignment), data_(Allocate(bytes, alignment)) {}
 
   ~AlignedBuffer() { ::operator delete(data_, std::align_val_t{alignment_}); }
 
@@ -36,6 +30,13 @@ class AlignedBuffer {
   size_t size() const { return size_; }
 
  private:
+  // 校验必须在分配之前：非 2 的幂在 ::operator new 的对齐重载里已经是未定义
+  // 行为，断言写在构造函数体里（分配之后）就来不及兜底了。
+  static std::byte* Allocate(size_t bytes, size_t alignment) {
+    assert(alignment != 0 && (alignment & (alignment - 1)) == 0);
+    return static_cast<std::byte*>(::operator new(bytes, std::align_val_t{alignment}));
+  }
+
   size_t size_;
   size_t alignment_;
   std::byte* data_;

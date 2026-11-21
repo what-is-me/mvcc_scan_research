@@ -178,6 +178,44 @@ TEST(UndoAppender, UnwrittenFreshPageIsWrittenBackOnEviction) {
   pool.Unpin(reloaded);
 }
 
+// Reserve 里的 Fix 可能抛（淘汰脏帧写回失败，§7.4 明确磁盘满不是小概率）。
+// 页号与槽位必须等它成功之后再推进：否则 appender 指向一个从未落盘的页号，
+// 下一次 Reserve 走 Fix 读文件尾，这个线程就永久写不了 undo 了。
+TEST(UndoAppender, FailedPageFixDoesNotPoisonTheAppender) {
+  const TableLayout layout = TestLayout();
+  test::MemoryPageFile file(kFilePages, layout.page_size(), test::PageFill::kZero);
+  UndoPool pool = MakePool(layout, /*frame_count=*/1, file);
+  UndoPageAllocator allocator;
+  UndoAppender appender(allocator, layout);
+
+  const std::array<std::byte, 16> old_data = OldData(1);
+  const VersionStamp version = VersionStamp::Committed(1);
+
+  // 把第一页写满：唯一那帧现在是脏的，下一次分配必须先把这一页写回。
+  for (size_t slot = 0; slot < layout.rows_per_page(); ++slot) {
+    auto reservation = appender.Reserve(pool);
+    reservation.Write(version, RowId::Null(), old_data);
+  }
+  ASSERT_EQ(file.writes.load(), 0u);
+
+  // 分配新页要先淘汰并写回；注入写失败让这次 Reserve 抛出。
+  const PageId page_before = appender.current_page();
+  const size_t slot_before = appender.records_on_current_page();
+  file.fail_write_page.store(0);
+  EXPECT_THROW(appender.Reserve(pool), std::runtime_error);
+  file.fail_write_page.store(-1);
+
+  // 失败的那次不能推进页/槽状态。若推进了，下一次会去 Fix 一个从未落盘的
+  // 页号——真实文件读到文件尾，这个线程永久写不了 undo。内存文件不会抛，
+  // 所以这里直接查状态，而不是依赖重试时的异常。
+  EXPECT_EQ(appender.current_page(), page_before);
+  EXPECT_EQ(appender.records_on_current_page(), slot_before);
+
+  auto reservation = appender.Reserve(pool);
+  reservation.Write(version, RowId::Null(), old_data);
+  EXPECT_EQ(file.writes.load(), 1u);  // 旧页在重试时写回成功
+}
+
 TEST(UndoAppender, ConcurrentAppendersUseDistinctIds) {
   const TableLayout layout = TestLayout();
   test::MemoryPageFile file(kFilePages, layout.page_size());

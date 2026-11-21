@@ -20,6 +20,12 @@ constexpr size_t kMaxRowsPerPage = 65536;
 constexpr uint64_t kMaxUpdatesPerSecond = 1'000'000;
 constexpr uint64_t kGiB = 1024ull * 1024 * 1024;
 
+// 上界只为让后续乘法不溢出：这些值远超实验矩阵，超了就不是配置错误而是
+// 输入错误，启动即拒。
+constexpr size_t kMaxTableRows = 1'000'000'000;
+constexpr size_t kMaxPoolMb = 1'048'576;
+constexpr size_t kMaxDurationSeconds = 86'400;
+
 std::string_view Trim(std::string_view text) {
   const size_t begin = text.find_first_not_of(" \t\r\n");
   if (begin == std::string_view::npos) return {};
@@ -197,6 +203,7 @@ std::string Config::Validate() const {
   }
   if (row_size_b % 8 != 0) return "row_size_b must be a multiple of 8";
   if (table_rows == 0) return "table_rows must be positive";
+  if (table_rows > kMaxTableRows) return "table_rows is beyond the supported range";
 
   const size_t page_bytes = page_size_kb * 1024;
   if (row_size_b > page_bytes) return "row_size_b must not exceed page size";
@@ -208,6 +215,8 @@ std::string Config::Validate() const {
   if (base_pool_mb == 0) return "base_pool_mb must be positive";
   if (undo_pool_mb == 0) return "undo_pool_mb must be positive";
   if (undo_capacity_gb == 0) return "undo_capacity_gb must be positive";
+  if (base_pool_mb > kMaxPoolMb) return "base_pool_mb is beyond the supported range";
+  if (undo_pool_mb > kMaxPoolMb) return "undo_pool_mb is beyond the supported range";
 
   const uint64_t undo_required = static_cast<uint64_t>(duration_s) * kMaxUpdatesPerSecond *
                                  static_cast<uint64_t>(row_size_b);
@@ -222,6 +231,16 @@ std::string Config::Validate() const {
   if (rows_per_txn == 0) return "rows_per_txn must be positive";
   if (scan_interval_ms == 0) return "scan_interval_ms must be positive";
   if (duration_s == 0) return "duration_s must be positive";
+  if (duration_s > kMaxDurationSeconds) return "duration_s is beyond the supported range";
+
+  const size_t base_frames = base_pool_mb * 1024 * 1024 / page_bytes;
+  if (rows_per_txn > base_frames) {
+    return "rows_per_txn must not exceed the base pool frame count (" +
+           std::to_string(base_frames) + ")";
+  }
+
+  // 提交时逐行 pin 写集页。写集比池还大时，多个事务会各自攥着一部分帧等
+  // 下一页，谁也放不掉——必须在启动时不接受，而不是跑到一半挂住。
   return {};
 }
 
