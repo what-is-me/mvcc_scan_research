@@ -1,0 +1,71 @@
+# 每次推送与 PR：Linux 上三个并行任务。
+#
+# RelWithDebInfo 是实验的常规构建；Debug 开启断言（§12 的不变式断言只在
+# 非 NDEBUG 生效）；ThreadSanitizer 是 §3「并发测试必须通过 TSan」的落点
+# ——Windows/MinGW 没有 TSan 运行时，这条长期债由本 job 偿还。
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests-release:
+    name: unit tests (RelWithDebInfo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtest-dev ninja-build
+      - name: Configure
+        run: cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build
+        run: cmake --build build
+      - name: Run tests
+        working-directory: build
+        run: ctest --output-on-failure
+
+  tests-debug:
+    name: unit tests (Debug, asserts on)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtest-dev ninja-build
+      - name: Configure
+        run: cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build build
+      - name: Run tests
+        working-directory: build
+        run: ctest --output-on-failure
+
+  tests-tsan:
+    name: concurrency under ThreadSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtest-dev ninja-build
+      - name: Configure
+        run: >
+          cmake -G Ninja -S . -B build-tsan -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DMVCC_SANITIZER=thread
+      - name: Build
+        run: cmake --build build-tsan
+      # 单进程跑全量而不是 ctest 逐用例：TSan 运行时的进程初始化很重，
+      # 237 个用例各起一个进程会花掉十几分钟纯开销。失败时输出里带着
+      # [ RUN ] 用例名与 TSan 报告，定位足够。
+      - name: Run all tests under TSan
+        working-directory: build-tsan
+        run: ./bin/mvcc_tests

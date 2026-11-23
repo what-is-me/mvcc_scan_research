@@ -664,6 +664,25 @@ details[]（数组，最后一个字段；元素按 scan_seq 升序，自 1 起�
   流量，取差会把别人的读写算到扫描头上）
 ~~~
 
+### 持续集成（GitHub Actions，ubuntu-latest）
+
+Windows 只作本地开发，CI 全部在 Linux 上跑（§6 的 POSIX O_DIRECT 分支与
+§11 的参数约束在两平台语义一致；无缓冲 I/O 在 runner 的 ext4 上可用）：
+
+- **每次推送与 PR**：三个并行任务——RelWithDebInfo 全量单测、Debug 全量
+  单测（不变式断言只在非 NDEBUG 生效，§12）、ThreadSanitizer 并发全量。
+  §3 的 TSan 要求由该任务在 Linux 上执行——Windows/MinGW 没有 TSan
+  运行时，这条要求在本地不可达成，CI 是它的唯一落点。TSan 任务单进程
+  跑全量测试：TSan 的进程初始化很重，逐用例起进程会花掉十几分钟纯开销。
+- **benchmark 手动触发**（workflow_dispatch）：先跑单测守门，再按输入的
+  时长/行数/undo 容量跑完整 4 × 5 矩阵（`--matrix`，§12），汇总脚本
+  `scripts/summarize.py` 把这批 JSON 生成 Markdown 对照报告，写入
+  Job Summary 并随 artifact 上传。报告的绝对数字以本地为准——shared
+  runner 的 CPU 与磁盘有波动；同一环境内 20 组配置的横向对比与跨次
+  回归监测是它可靠的价值。
+- 汇总脚本不属系统功能（§12 输出格式一节），只依赖 Python 标准库，
+  从 JSON 内容分组，不解析文件名。
+
 ## 13. 建议实现顺序
 
 1. common + storage：行/页布局、建表初始化、文件读写；串行读写自测。

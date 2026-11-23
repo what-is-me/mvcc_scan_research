@@ -1,0 +1,73 @@
+# benchmark 手动触发：先跑单测守门，再按输入跑完整 4×5 矩阵，
+# 汇总脚本生成 Markdown 报告（Job Summary + artifact）。
+#
+# runner 磁盘与 CPU 与本地不同：绝对数字以本地为准，CI 产出的价值是
+# 同一环境内 20 组配置的横向对比与跨次回归监测。
+name: benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_s:
+        description: 每轮实验时长（秒）；20 轮总时长约为它的 20 倍 + 建表
+        default: '10'
+      table_rows:
+        description: 表行数
+        default: '2000000'
+      undo_capacity_gb:
+        description: undo 文件容量（GB）；时长超过约 130 s 时必须加大
+        default: '16'
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: tests gate (RelWithDebInfo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtest-dev ninja-build
+      - name: Configure
+        run: cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build
+        run: cmake --build build
+      - name: Run tests
+        working-directory: build
+        run: ctest --output-on-failure
+
+  benchmark:
+    name: full matrix (4 scan policies x 5 replacers)
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtest-dev ninja-build
+      - name: Configure
+        run: cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build
+        run: cmake --build build
+      - name: Run matrix
+        run: |
+          ./build/bin/mvcc_exp --matrix \
+            --experiment-id=ci_${{ github.run_number }} \
+            config/default.cfg \
+            duration_s=${{ inputs.duration_s || '10' }} \
+            table_rows=${{ inputs.table_rows || '2000000' }} \
+            undo_capacity_gb=${{ inputs.undo_capacity_gb || '16' }} \
+            results_dir=results
+      - name: Summarize into job summary
+        run: |
+          python3 scripts/summarize.py 'results/*.json' > benchmark_report.md
+          cat benchmark_report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload report and raw results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ github.run_number }}
+          path: |
+            benchmark_report.md
+            results/
