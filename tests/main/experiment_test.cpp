@@ -120,6 +120,21 @@ TEST(ExperimentJson, EmitsTopLevelFieldsInSpecOrderAndDetailsLast) {
   EXPECT_NE(text.find("\"scan_seq\": 1, \"start_time_s\": 0.001, \"main_scan_ms\": 1.000"),
             std::string::npos);
   EXPECT_NE(text.find("]\n}\n"), std::string::npos);
+
+  // 明细行内 12 个字段同样按规范顺序出现。搜索起点锚在 details 之后，避免
+  // 匹配到顶层的同名字段。
+  const std::vector<std::string> detail_order = {
+      "scan_seq", "start_time_s", "main_scan_ms", "resolve_ms",
+      "chain_rows", "chain_hops", "base_logical_reads", "base_physical_reads",
+      "base_physical_read_ops", "undo_logical_reads", "undo_physical_reads",
+      "undo_physical_read_ops"};
+  size_t detail_previous = details;
+  for (const std::string& key : detail_order) {
+    const size_t position = text.find("\"" + key + "\":", detail_previous);
+    EXPECT_NE(position, std::string::npos) << key << " missing in detail row";
+    EXPECT_GT(position, detail_previous) << key << " out of order in detail row";
+    detail_previous = position;
+  }
 }
 
 TEST(ExperimentJson, EscapesTheExperimentId) {
@@ -161,6 +176,24 @@ TEST(Experiment, TinyRunProducesConsistentSummaryAndJson) {
     }
     EXPECT_GE(summary.details[index].main_scan_ms, 0.0);
   }
+
+  // §12：顶层池指标是各次扫描增量的累加，与 details 逐列求和一致。
+  uint64_t base_logical = 0, base_physical = 0, base_ops = 0;
+  uint64_t undo_logical = 0, undo_physical = 0, undo_ops = 0;
+  for (const ScanDetail& detail : summary.details) {
+    base_logical += detail.base_logical_reads;
+    base_physical += detail.base_physical_reads;
+    base_ops += detail.base_physical_read_ops;
+    undo_logical += detail.undo_logical_reads;
+    undo_physical += detail.undo_physical_reads;
+    undo_ops += detail.undo_physical_read_ops;
+  }
+  EXPECT_EQ(summary.base_logical_reads, base_logical);
+  EXPECT_EQ(summary.base_physical_reads, base_physical);
+  EXPECT_EQ(summary.base_physical_read_ops, base_ops);
+  EXPECT_EQ(summary.undo_logical_reads, undo_logical);
+  EXPECT_EQ(summary.undo_physical_reads, undo_physical);
+  EXPECT_EQ(summary.undo_physical_read_ops, undo_ops);
   // 表文件已删除；JSON 由入口层写，这里自己写一份来检查产物形状。
   EXPECT_FALSE(fs::exists(dir / "smoke_base.tbl"));
   EXPECT_FALSE(fs::exists(dir / "smoke_undo.tbl"));

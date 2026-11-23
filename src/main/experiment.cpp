@@ -69,11 +69,6 @@ ScanDetail operator+(const ScanDetail& left, const ScanDetail& right) {
   return sum;
 }
 
-double HitRate(uint64_t logical_reads, uint64_t logical_misses) {
-  if (logical_reads == 0) return 0.0;
-  return 1.0 - static_cast<double>(logical_misses) / static_cast<double>(logical_reads);
-}
-
 // 每次实验重建文件：BuildBaseFile 自己删旧文件；undo 只追加，残留会让新一轮
 // 从旧页号上继续写，同样必须删。
 template <typename BaseReplacer>
@@ -124,10 +119,12 @@ ExperimentSummary RunExperimentWith(const Config& config, const std::string& exp
     }
 
     // AP 扫描线程：先扫一次，再按间隔触发。间隔分片等待，停止请求不必等完
-    // 一个完整间隔；停止后的那一次扫描不再发起，在途的扫完即退出。
+    // 一个完整间隔；停止检查在扫描之前，在途的扫完即退出，停止后的那一轮
+    // 不再发起。
     std::thread ap([&] {
       uint64_t seq = 0;
       for (;;) {
+        if (stop.load(std::memory_order_acquire)) break;
         // §11：间隔是相邻两次扫描起始时刻之差。基准取本次扫描的开始时刻，
         // 不能取扫描结束后的 now()——那会把扫描耗时叠进间隔，defer 的解析段
         // 越长扫描频率越低，负载强度随策略漂移，对照实验就废了。扫描比间隔
@@ -140,7 +137,6 @@ ExperimentSummary RunExperimentWith(const Config& config, const std::string& exp
         base_misses += result.base_stats.logical_misses;
         undo_misses += result.undo_stats.logical_misses;
 
-        if (stop.load(std::memory_order_acquire)) break;
         const auto next_scan_at =
             scan_started + std::chrono::milliseconds(config.scan_interval_ms);
         while (!stop.load(std::memory_order_acquire) &&
@@ -187,17 +183,19 @@ ExperimentSummary RunExperimentWith(const Config& config, const std::string& exp
   summary.base_logical_reads = total.base_logical_reads;
   summary.base_physical_reads = total.base_physical_reads;
   summary.base_physical_read_ops = total.base_physical_read_ops;
-  summary.base_hit_rate = HitRate(summary.base_logical_reads, base_misses);
+  summary.base_hit_rate = PoolStats::HitRate(summary.base_logical_reads, base_misses);
   summary.undo_logical_reads = total.undo_logical_reads;
   summary.undo_physical_reads = total.undo_physical_reads;
   summary.undo_physical_read_ops = total.undo_physical_read_ops;
-  summary.undo_hit_rate = HitRate(summary.undo_logical_reads, undo_misses);
+  summary.undo_hit_rate = PoolStats::HitRate(summary.undo_logical_reads, undo_misses);
 
   summary.tp_throughput_txn_per_s =
       elapsed_s > 0 ? static_cast<double>(outcome.committed) / elapsed_s : 0.0;
   summary.tp_latency_ms_p50 = outcome.latency.PercentileMs(0.50);
   summary.tp_latency_ms_p99 = outcome.latency.PercentileMs(0.99);
-  const uint64_t attempts = outcome.committed + outcome.conflicts + outcome.write_set_full;
+  // 分母只含走到冲突检查的事务：write_set_full 在检查之前就返回了，混进来
+  // 会稀释比率（正常参数下恒为 0，口径仍要干净）。
+  const uint64_t attempts = outcome.committed + outcome.conflicts;
   summary.write_conflict_rate =
       attempts > 0 ? static_cast<double>(outcome.conflicts) / static_cast<double>(attempts) : 0.0;
 

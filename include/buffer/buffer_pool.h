@@ -41,10 +41,13 @@ struct PoolStats {
 
   // 命中率只能由逻辑未命中算出。物理读包含预取装入、但可能从未被访问的页，
   // 一旦用它反推，命中率会算成负数（预取 8 页只访问 4 页时 1 - 8/4 = -1）。
-  double hit_rate() const {
+  // 公式只有一份：实验装配层聚合各次扫描的增量时也用它。
+  static double HitRate(uint64_t logical_reads, uint64_t logical_misses) {
     if (logical_reads == 0) return 0.0;
     return 1.0 - static_cast<double>(logical_misses) / static_cast<double>(logical_reads);
   }
+
+  double hit_rate() const { return HitRate(logical_reads, logical_misses); }
 };
 
 template <PageMapping Mapping, FrameReplacer Replacer>
@@ -381,6 +384,10 @@ class BufferPool {
     guard.Commit();
     replacer_.OnEvict(*victim, victim_page);
     table_.Erase(victim_page);
+    // 条目已清空，等在 !InFlight(victim_page) 上的线程此刻谓词变真——任何让
+    // 谓词变真的变化都伴随一次通知（§7.4），不能指望之后的装载完成再兜底，
+    // 否则这些线程要多睡一个读盘周期。
+    cv_.notify_all();
 
     // 写回期间别的线程可能已经把这一页装进来了；此时放弃淘汰，帧退还空闲表，
     // 否则同一页会关联两个帧，帧内行锁互斥随之失效（IN2）。脏标志必须在这里

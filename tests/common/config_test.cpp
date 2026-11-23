@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <fstream>
+#include <limits>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -47,12 +48,20 @@ TEST(Config, DefaultsMatchDocumentedValues) {
   EXPECT_EQ(config.results_dir, "./results");
 }
 
-TEST(Config, RejectsPageSizeNotMultipleOfSector) {
+// §11 变化范围：矩阵之外的页大小一律拒绝——容量乘法先验上限再进行，
+// 回绕会让"超限报错"失效。
+TEST(Config, RejectsPageSizeOutsideDocumentedRange) {
   Config config;
   config.page_size_kb = 3;
   EXPECT_NE(config.Validate().find("page_size_kb"), std::string::npos);
 
-  config.page_size_kb = 4;
+  config.page_size_kb = 4;  // 是扇区倍数，但不在 8/16/32/64 之内
+  EXPECT_NE(config.Validate().find("page_size_kb"), std::string::npos);
+
+  config.page_size_kb = 128;  // 2 的幂，同样超出矩阵
+  EXPECT_NE(config.Validate().find("page_size_kb"), std::string::npos);
+
+  config.page_size_kb = 8;
   EXPECT_EQ(config.Validate(), std::string{});
 }
 
@@ -178,9 +187,28 @@ TEST(Config, ValidateRejectsUndoCapacityBelowTheEstimate) {
 
 TEST(Config, ValidateRejectsRowLargerThanPage) {
   Config config;
-  config.page_size_kb = 4;
-  config.row_size_b = 8192;
+  config.page_size_kb = 8;
+  config.row_size_b = 16384;
   EXPECT_NE(config.Validate().find("page size"), std::string::npos);
+}
+
+// 上限校验必须走在乘法之前：duration_s 的上限若在 undo 容量估算之后才查，
+// 估算式（duration_s 是乘数）会先把限制顶爆，报出来的就是 undo 容量错误——
+// 必须断言报的是 duration_s 本身，否则顺序错了测试也察觉不到。
+TEST(Config, ValidateRejectsDurationAndUndoCapacityBeyondRange) {
+  Config config;
+  config.duration_s = 86'401;
+  EXPECT_NE(config.Validate().find("duration_s is beyond"), std::string::npos);
+  EXPECT_EQ(config.Validate().find("undo_capacity_gb"), std::string::npos);
+
+  Config huge;
+  huge.duration_s = std::numeric_limits<size_t>::max();
+  EXPECT_NE(huge.Validate().find("duration_s is beyond"), std::string::npos);
+  EXPECT_EQ(huge.Validate().find("undo_capacity_gb"), std::string::npos);
+
+  Config capacity;
+  capacity.undo_capacity_gb = 1'048'577;
+  EXPECT_NE(capacity.Validate().find("undo_capacity_gb is beyond"), std::string::npos);
 }
 
 TEST(Config, ValidateRejectsTinyRowAndMisalignedRow) {

@@ -1,5 +1,6 @@
 #include "common/config.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -24,7 +25,12 @@ constexpr uint64_t kGiB = 1024ull * 1024 * 1024;
 // 输入错误，启动即拒。
 constexpr size_t kMaxTableRows = 1'000'000'000;
 constexpr size_t kMaxPoolMb = 1'048'576;
+constexpr size_t kMaxUndoCapacityGb = 1'048'576;  // 1 PiB，远超任何实验需要
 constexpr size_t kMaxDurationSeconds = 86'400;
+
+// §11 变化范围：矩阵之外的页大小直接拒绝。页大小先定界，page_bytes 之后
+// 的每一次乘法才可能有界。
+constexpr size_t kAllowedPageSizeKb[] = {8, 16, 32, 64};
 
 std::string_view Trim(std::string_view text) {
   const size_t begin = text.find_first_not_of(" \t\r\n");
@@ -194,7 +200,10 @@ bool Config::Set(std::string_view key, std::string_view value, std::string* erro
 }
 
 std::string Config::Validate() const {
-  if (page_size_kb == 0) return "page_size_kb must be positive";
+  const bool page_in_matrix =
+      std::find(std::begin(kAllowedPageSizeKb), std::end(kAllowedPageSizeKb), page_size_kb) !=
+      std::end(kAllowedPageSizeKb);
+  if (!page_in_matrix) return "page_size_kb must be one of 8/16/32/64 (KB)";
   if (row_size_b < kRowHeaderBytes) return "row_size_b must hold a 16-byte row header";
   // 数据区至少要放一个折叠字。行宽恰好等于头长时数据区为空，校验和对任何
   // 内容都相同，正确性 oracle 直接失效——这种配置必须启动即拒。
@@ -208,15 +217,19 @@ std::string Config::Validate() const {
   const size_t page_bytes = page_size_kb * 1024;
   if (row_size_b > page_bytes) return "row_size_b must not exceed page size";
   if (page_bytes / row_size_b > kMaxRowsPerPage) return "too many rows per page for a 16-bit slot";
-  if (page_bytes % kSectorBytes != 0) {
-    return "page_size_kb must be a multiple of 4 for direct I/O";
-  }
 
   if (base_pool_mb == 0) return "base_pool_mb must be positive";
   if (undo_pool_mb == 0) return "undo_pool_mb must be positive";
   if (undo_capacity_gb == 0) return "undo_capacity_gb must be positive";
   if (base_pool_mb > kMaxPoolMb) return "base_pool_mb is beyond the supported range";
   if (undo_pool_mb > kMaxPoolMb) return "undo_pool_mb is beyond the supported range";
+  if (undo_capacity_gb > kMaxUndoCapacityGb) {
+    return "undo_capacity_gb is beyond the supported range";
+  }
+  // 时长上限必须走在 undo 容量估算之前：估算式里有 duration_s 这个乘数，
+  // 后验的话回绕的乘积可能恰好落进容量限制之内，把非法配置放过去。
+  if (duration_s == 0) return "duration_s must be positive";
+  if (duration_s > kMaxDurationSeconds) return "duration_s is beyond the supported range";
 
   const uint64_t undo_required = static_cast<uint64_t>(duration_s) * kMaxUpdatesPerSecond *
                                  static_cast<uint64_t>(row_size_b);
@@ -230,8 +243,6 @@ std::string Config::Validate() const {
   if (tp_threads == 0) return "tp_threads must be positive";
   if (rows_per_txn == 0) return "rows_per_txn must be positive";
   if (scan_interval_ms == 0) return "scan_interval_ms must be positive";
-  if (duration_s == 0) return "duration_s must be positive";
-  if (duration_s > kMaxDurationSeconds) return "duration_s is beyond the supported range";
 
   const size_t base_frames = base_pool_mb * 1024 * 1024 / page_bytes;
   if (rows_per_txn > base_frames) {

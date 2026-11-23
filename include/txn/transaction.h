@@ -88,27 +88,29 @@ class Transaction {
 
     // 1. 先占 undo 槽位并 pin 住 undo 页：这一步可能读盘或等待，必须在行
     //    mutex 之外完成。
-    auto reservation = appender_->Reserve(*undo_pool_);
-
     {
-      // 2. pin 基表页 + 行 mutex。
-      RowGuard<BasePool> guard(*base_pool_, *layout_, id);
+      auto reservation = appender_->Reserve(*undo_pool_);
 
-      // 3. 冲突检查：已有未决写入，或读取后又被别人提交过。
-      const VersionStamp current = guard.row().version();
-      if (current.locked() || current.timestamp() >= context_->read_ts()) {
-        return UpdateOutcome::kConflict;
+      {
+        // 2. pin 基表页 + 行 mutex。
+        RowGuard<BasePool> guard(*base_pool_, *layout_, id);
+
+        // 3. 冲突检查：已有未决写入，或读取后又被别人提交过。
+        const VersionStamp current = guard.row().version();
+        if (current.locked() || current.timestamp() >= context_->read_ts()) {
+          return UpdateOutcome::kConflict;
+        }
+
+        // 4-6. 写 undo 记录 -> 更新链头 -> 置锁，顺序不可调换（I5）。
+        reservation.Write(current, guard.row().undo_row_id(), guard.row().data());
+        guard.row().set_undo_row_id(reservation.id());
+        guard.row().set_version(current.WithLock());
+        guard.MarkDirty();
       }
-
-      // 4-6. 写 undo 记录 -> 更新链头 -> 置锁，顺序不可调换（I5）。
-      reservation.Write(current, guard.row().undo_row_id(), guard.row().data());
-      guard.row().set_undo_row_id(reservation.id());
-      guard.row().set_version(current.WithLock());
-      guard.MarkDirty();
+      // 7. 守卫已析构（先放 mutex 后 unpin），reservation 随之析构、unpin undo 页。
     }
 
-    // 7. 守卫已析构（先放锁后 unpin），reservation 在本函数结束时 unpin undo 页。
-    // 8. 追加写集。
+    // 8. 追加写集（§9.3：先归还 undo 页 pin，再记写集）。
     const size_t index = context_->Append(id);
     std::copy(new_data.begin(), new_data.end(), context_->mutable_data_at(index).begin());
     return UpdateOutcome::kApplied;

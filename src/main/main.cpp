@@ -49,7 +49,7 @@ int main(int argc, char** argv) {
   for (int index = 1; index < argc; ++index) {
     const std::string arg = argv[index];
     if (arg.rfind("--experiment-id=", 0) == 0) {
-      experiment_id = arg.substr(strlen("--experiment-id="));
+      experiment_id = arg.substr(sizeof("--experiment-id=") - 1);
       explicit_id = true;
       continue;
     }
