@@ -52,7 +52,7 @@ struct Env {
         undo(layout, kUndoFrames, undo_file, RowLockMode::kNone, FrameHashTable(kUndoFrames),
              LruReplacer(kUndoFrames)),
         appender(allocator, layout),
-        timestamps(kThreads),
+        timestamps(kThreads + 2),  // 确定性冲突对用独立槽位，见 ReplayOracle
         scanner(base, undo, layout) {}
 
   TableLayout layout;
@@ -166,6 +166,51 @@ TEST(MvccConcurrency, ConcurrentUpdatesAndScansMatchReplayOracle) {
   std::vector<CommitRecord> log;
   std::atomic<size_t> conflicts{0};
 
+  // 冲突的确定性来源：随机负载的冲突窗口只有 Update 置锁到 Commit 清锁的几
+  // 微秒，能不能撞上全看调度运气——runner 一慢，四个线程整段串行，一次也
+  // 撞不出（CI 上 conflicts>0 因此偶发失败；循环里的 yield 把并行变成串行，
+  // 对撞冲突更是负贡献）。这里用一对受控事务构造必然的冲突：first 置锁后
+  // 停住，contender 确认锁已置再更新同一行，first-updater-wins 必然拒绝。
+  // 计入与随机负载同一份统计；线程槽位用 kThreads+1、kThreads+2 两个独立
+  // 槽，与随机负载的 0..kThreads-1 完全隔离。
+  std::atomic<bool> lock_taken{false};
+  TxnContext context_first(1, env.layout.data_size());
+  TxnContext context_second(1, env.layout.data_size());
+  UndoAppender appender_first(env.allocator, env.layout);
+  UndoAppender appender_second(env.allocator, env.layout);
+  const RowId pinned_row = env.layout.RowIdAt(0);
+  // 随机负载的 serial 占 [1, kThreads*kTxnsPerThread]，确定性对用下一段编号。
+  const uint32_t pinned_serial = static_cast<uint32_t>(kThreads * kTxnsPerThread + 1);
+
+  Txn first(env.base, env.undo, env.layout, appender_first, env.timestamps, kThreads,
+            context_first);
+  first.Begin();
+  ASSERT_EQ(first.Update(pinned_row, ValueFor(pinned_serial, env.layout.data_size())),
+            UpdateOutcome::kApplied);
+  lock_taken.store(true, std::memory_order_release);
+
+  std::thread contender([&] {
+    Txn second(env.base, env.undo, env.layout, appender_second, env.timestamps, kThreads + 1,
+               context_second);
+    while (!lock_taken.load(std::memory_order_acquire)) std::this_thread::yield();
+    second.Begin();
+    if (second.Update(pinned_row, ValueFor(pinned_serial + 1, env.layout.data_size())) !=
+        UpdateOutcome::kApplied) {
+      conflicts.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      // 走到这里说明冲突判定变了：conflicts>0 的断言会失败，把变化暴露出来。
+      second.Commit();
+      const std::lock_guard<std::mutex> guard(log_mutex);
+      log.push_back(CommitRecord{second.commit_ts(), 0, pinned_serial + 1});
+    }
+  });
+  contender.join();
+  first.Commit();
+  {
+    const std::lock_guard<std::mutex> guard(log_mutex);
+    log.push_back(CommitRecord{first.commit_ts(), 0, pinned_serial});
+  }
+
   std::vector<std::thread> writers;
   writers.reserve(kThreads);
   for (size_t thread = 0; thread < kThreads; ++thread) {
@@ -192,8 +237,9 @@ TEST(MvccConcurrency, ConcurrentUpdatesAndScansMatchReplayOracle) {
 
         const std::lock_guard<std::mutex> guard(log_mutex);
         log.push_back(CommitRecord{txn.commit_ts(), row, serial});
-        // 单事务只有几微秒，整个循环可能落在一个调度时间片里，四个线程完全
-        // 串行——那样永远撞不出冲突。让出一次，保证线程真的交错。
+        // 让出一次把写负载摊到时间轴上：scanner 的中间态采样才能夹住未回放
+        // 的提交。它并不帮助制造冲突——把并行变成串行反而降低碰撞概率；
+        // conflicts > 0 由上面的确定性冲突对保证，不指望这里撞出来。
         std::this_thread::yield();
       }
     });

@@ -685,8 +685,21 @@ Windows 只作本地开发，CI 全部在 Linux 上跑（§6 的 POSIX O_DIRECT 
   多轮扫描的节拍断言归 interval 专项用例（间隔取扫描耗时的数倍，余量以
   数量级计），冒烟只断言 scan_count ≥ 1；"触发一次 undo 淘汰写回"所需的
   工作量按 attempts 计——冲突事务同样消费 undo 槽位（Reserve 先于冲突
-  检查，§9.3），冒烟配置用 512 B 行宽 + rows_per_txn=16 把这条门槛压到
-  约两百次尝试，比首个配置低两个数量级。
+  检查，§9.3），冒烟配置用 4 KB 行宽（每 undo 页 16 条、池 256 槽）+
+  rows_per_txn=8 把这条门槛压到 32 次尝试；TSan 构建再把计时窗口放大
+  8 倍（下一条），插桩减速也不再是变量。
+- 概率型断言必须有确定性兜底：随机并发负载的"冲突 > 0"依赖调度运气——
+  冲突窗口只有 Update 置锁到 Commit 清锁的几微秒，runner 一慢四个线程
+  整段串行就一次也撞不出（CI 上因此偶发失败；循环里的 yield 把并行变成
+  串行，对撞冲突是负贡献）。负载真实性由显式构造的冲突对保证：一个事务
+  置锁后停住，另一个确认锁已置再更新同一行，first-updater-wins 必然拒绝
+  （ReplayOracle 用例）。随机负载只承担 oracle 回放素材，不承担"撞出
+  冲突"的举证责任。
+- TSan 插桩对内存密集路径有 15~20 倍减速：端到端计时窗口在 TSan 构建下
+  放大 8 倍（kTsanTimeScale；CMake 把 sanitizer 种类暴露成
+  MVCC_SANITIZER_* 宏）。undo_capacity_gb 按满速估算给足即可——PagedFile
+  按需增长、capacity 只是防打穿的校验数字，调大不占磁盘。矩阵用例断言
+  只有 ≥1 轮，duration 保持下限，避免 20 轮把套件时长拖爆。
 - **benchmark 手动触发**（workflow_dispatch）：先跑单测守门，再按输入的
   时长/行数/undo 容量跑完整 4 × 5 矩阵（`--matrix`，§12），汇总脚本
   `scripts/summarize.py` 把这批 JSON 生成 Markdown 对照报告，写入

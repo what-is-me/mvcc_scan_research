@@ -40,6 +40,10 @@ endif()
 # TSan 在 Windows 上没有可用运行时，并发测试要到 Linux/WSL 下用同一份脚本
 # 构建：-DMVCC_SANITIZER=thread。MSVC 只有 address sanitizer。
 if(MVCC_SANITIZER)
+  # sanitizer 种类暴露成宏（MVCC_SANITIZER_THREAD 等），测试据此调整插桩
+  # 敏感的计时窗口（TSan 有 15~20 倍减速，见 AGENTS.md §12）。
+  string(TOUPPER "${MVCC_SANITIZER}" MVCC_SANITIZER_UPPER)
+  target_compile_definitions(mvcc_options INTERFACE MVCC_SANITIZER_${MVCC_SANITIZER_UPPER})
   if(MSVC)
     if(NOT MVCC_SANITIZER STREQUAL "address")
       message(FATAL_ERROR "MSVC 只支持 address sanitizer；${MVCC_SANITIZER} 需要 GCC 或 Clang。")

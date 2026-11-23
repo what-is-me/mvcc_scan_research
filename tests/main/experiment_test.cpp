@@ -13,20 +13,31 @@ namespace {
 
 namespace fs = std::filesystem;
 
+// TSan 插桩对内存访问密集的路径有 15~20 倍减速：端到端计时窗口按倍数放大，
+// 让断言既不隐含机器速度下限、也不隐含"非插桩速度"（§12）。matrix 用例的
+// 断言只要求跑出 ≥1 轮，duration 保持下限，避免 20 轮把套件时长拖爆。
+#ifdef MVCC_SANITIZER_THREAD
+constexpr int kTsanTimeScale = 8;
+#else
+constexpr int kTsanTimeScale = 1;
+#endif
+
 // 冒烟配置的每个维度只服务一件事：让"undo 淘汰写回"在极少量的更新尝试内
-// 必然发生，CI runner 的停顿也挡不住它。理由见 TinyRun 的说明。
+// 必然发生，CI runner 的停顿与 TSan 插桩都挡不住它。理由见 TinyRun 的说明。
 Config TinyConfig(const fs::path& dir) {
   Config config;
-  config.table_rows = 512;   // 64 KB 页 / 512 B 行 = 128 行/页 → 4 页
-  config.row_size_b = 512;   // undo 记录与基表行同宽（§4）：512 B/条 → 每页 128 条
-  config.base_pool_mb = 1;
-  config.undo_pool_mb = 1;
-  config.undo_capacity_gb = 1;
+  config.table_rows = 512;   // 64 KB 页 / 4 KB 行 = 16 行/页 → 32 页
+  config.row_size_b = 4096;  // undo 记录与基表行同宽（§4）：每 undo 页 16 条
+  config.base_pool_mb = 1;   // 16 帧：写集 ≤ 8 页 + 扫描 1 帧，提交期 pin 不饥饿
+  config.undo_pool_mb = 1;   // 16 帧 × 16 条 = 256 槽
+  // 满速估算（TSan 窗口 8 s × 1M 行/s × 4 KB）也要过防打穿校验。PagedFile
+  // 按需增长，这个数字不占磁盘。
+  config.undo_capacity_gb = 33;
   config.tp_threads = 2;
-  config.rows_per_txn = 16;  // 校验上限（≤ 基表池帧数）：一次尝试最多占 16 个 undo 槽位
+  config.rows_per_txn = 8;  // 每次尝试占 8 槽 → 32 次尝试必触发首次淘汰
   config.key_dist = KeyDist::kUniform;
   config.scan_interval_ms = 200;
-  config.duration_s = 1;
+  config.duration_s = 1 * kTsanTimeScale;
   config.results_dir = dir.string();
   return config;
 }
@@ -166,9 +177,10 @@ TEST(ExperimentJson, EscapesTheExperimentId) {
 //   专项断言（那边间隔取扫描耗时的数倍，余量以数量级计）。
 // - undo_file_mb_end > 0 要求跑出至少一次淘汰写回。undo 记录与基表行同宽
 //   （§4），undo 池容量 = 池字节 / 行宽；行宽 128 B 时容量 8192 槽，CI 停顿
-//   窗口内根本填不满。行宽提到 512 B、rows_per_txn 提到校验上限 16，把门槛
-//   压到 ~200 次更新尝试——冲突事务同样消费 undo 槽位（Reserve 先于冲突
-//   检查，§9.3），所以这条门槛按 attempts 计，必然跨过。
+//   窗口内根本填不满。行宽提到 4 KB（每 undo 页 16 条、池 256 槽）、
+//   rows_per_txn=8，把门槛压到 32 次更新尝试——冲突事务同样消费 undo 槽位
+//   （Reserve 先于冲突检查，§9.3），按 attempts 计，TSan 插桩 + 停顿也拦不住；
+//   TSan 构建再把计时窗口放大 8 倍（kTsanTimeScale）。
 TEST(Experiment, TinyRunProducesConsistentSummaryAndJson) {
   const fs::path dir = fs::temp_directory_path() / "mvcc_exp_smoke";
   fs::remove_all(dir);
@@ -237,11 +249,11 @@ TEST(Experiment, ScanIntervalIsMeasuredBetweenScanStarts) {
   config.table_rows = 800000;  // 1563 页：本机实测扫描约 100~260 ms
   config.base_pool_mb = 16;
   config.undo_pool_mb = 8;
-  config.undo_capacity_gb = 1;
+  config.undo_capacity_gb = 16;  // TSan 下 16 s × 满速 1M 行/s × 128 B = 2 GB，给足即可
   config.tp_threads = 2;
   config.key_dist = KeyDist::kUniform;
   config.scan_interval_ms = 600;  // 数倍于扫描耗时：每一轮都落在可分辨区域
-  config.duration_s = 2;
+  config.duration_s = 2 * kTsanTimeScale;
   config.results_dir = (std::filesystem::temp_directory_path() / "mvcc_exp_interval").string();
 
   std::filesystem::remove_all(config.results_dir);
@@ -275,6 +287,7 @@ TEST(Experiment, MatrixRunsEveryScanPolicyReplacerPair) {
 
   Config config = TinyConfig(dir);
   config.scan_interval_ms = 100;
+  config.duration_s = 1;  // 断言只要 ≥1 轮：20 轮 × duration 是套件时长，保持下限
   const std::vector<ExperimentSummary> summaries = RunMatrix(config, "matrix");
 
   ASSERT_EQ(summaries.size(), 4u * 5u);
