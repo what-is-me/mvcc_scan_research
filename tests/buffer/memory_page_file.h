@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -42,7 +43,13 @@ class MemoryPageFile : public PageFile {
     }
   }
 
+  // 真实文件对同一区域的并发 I/O 由内核串行化（ext4 DIO 的 inode 锁：读
+  // 共享、写排他，读取不会撕裂）；替身没有内核，自己补一把文件级 mutex，
+  // 语义与 TSan 观察都对齐——预取整批设备读（含对已驻留页的重复读）与
+  // 淘汰写回会并发触碰同一份 data_。锁只包住替身自己的内存拷贝，调用方
+  // （池）本来就在池锁之外发 I/O，无锁序交互。
   void ReadPage(PageId page, std::span<std::byte> dst) override {
+    const std::lock_guard<std::mutex> guard(io_mutex_);
     if (fail_page.load(std::memory_order_relaxed) == static_cast<int64_t>(page)) {
       throw std::runtime_error("injected read failure");
     }
@@ -53,6 +60,7 @@ class MemoryPageFile : public PageFile {
   }
 
   void ReadPages(PageId first, size_t count, std::span<std::byte> dst) override {
+    const std::lock_guard<std::mutex> guard(io_mutex_);
     // 批量读也要能注入失败：预取的中途失败会走 ReleaseReserved，那条路径
     // 只有从整批里挑一页弄坏才测得到。
     const int64_t failed = fail_page.load(std::memory_order_relaxed);
@@ -68,6 +76,7 @@ class MemoryPageFile : public PageFile {
   }
 
   void WritePage(PageId page, std::span<const std::byte> src) override {
+    const std::lock_guard<std::mutex> guard(io_mutex_);
     if (fail_write_page.load(std::memory_order_relaxed) == static_cast<int64_t>(page)) {
       throw std::runtime_error("injected write failure");
     }
@@ -78,6 +87,8 @@ class MemoryPageFile : public PageFile {
 
   size_t page_size() const override { return page_size_; }
 
+  // 不加锁的直接访问：构造后按页填身份、测试里单线程读取持久化结果，
+  // 都不在并发路径上。
   std::span<std::byte> Page(PageId page) {
     CheckRange(page);
     return {data_.data() + page * page_size_, page_size_};
@@ -96,6 +107,7 @@ class MemoryPageFile : public PageFile {
  private:
   size_t page_count_;
   size_t page_size_;
+  mutable std::mutex io_mutex_;
   std::vector<std::byte> data_;
 };
 

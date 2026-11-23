@@ -1,0 +1,13 @@
+# ThreadSanitizer 抑制清单：只收录 AGENTS.md 明文认定的「有意竞态」。
+#
+# §6 / I7：行 mutex 只保护行头（版本戳、undo_row_id），数据区不加原子也
+# 不加锁——提交线程在读者不加锁时改写数据区，读者可能读到写者改到一半
+# 的中间态；这次读取若判定失败即整份丢弃（版本戳带锁位或 ts >= read_ts），
+# 不会返回给调用方，正确性由 I7 保证。TSan 无法理解「撕裂读取由协议判定」
+# 这个语义，把下列乐观读访问点按符号抑制；不在清单上的 race 一律视为真缺陷。
+#
+# 扫描器的乐观数据读（读端栈帧含 ChecksumBytes，写端为 Transaction::Commit）：
+race:mvcc::scan_detail::FoldBaseData
+race:mvcc::ChecksumBytes
+# 单行快照读（§9.2）的乐观数据拷贝：
+race:mvcc::ReadVisible

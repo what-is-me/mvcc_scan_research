@@ -674,6 +674,12 @@ Windows 只作本地开发，CI 全部在 Linux 上跑（§6 的 POSIX O_DIRECT 
   §3 的 TSan 要求由该任务在 Linux 上执行——Windows/MinGW 没有 TSan
   运行时，这条要求在本地不可达成，CI 是它的唯一落点。TSan 任务单进程
   跑全量测试：TSan 的进程初始化很重，逐用例起进程会花掉十几分钟纯开销。
+  TSan 对两类报告的处置：测试替身 MemoryPageFile 对 data_ 的并发 I/O
+  用一把文件级 mutex 串行化——真实内核对同一文件区域的并发 I/O 就是这样
+  （ext4 DIO 的 inode 锁：读共享、写排他），替身补齐语义后 race 消失；
+  §6/I7 的数据区乐观读是有意竞态（撕裂读取由版本戳判定整份丢弃），TSan
+  无法理解该协议，用 `tsan_suppressions.txt` 按读端符号标注，清单之外
+  的 race 一律视为真缺陷使任务变红。
 - **benchmark 手动触发**（workflow_dispatch）：先跑单测守门，再按输入的
   时长/行数/undo 容量跑完整 4 × 5 矩阵（`--matrix`，§12），汇总脚本
   `scripts/summarize.py` 把这批 JSON 生成 Markdown 对照报告，写入
