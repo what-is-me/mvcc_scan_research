@@ -4,8 +4,8 @@
 
 #include <gtest/gtest.h>
 
-#include "workload/key_mapper.h"
-#include "workload/zipf.h"
+#include "tp/key_mapper.h"
+#include "tp/zipf.h"
 
 namespace mvcc {
 namespace {

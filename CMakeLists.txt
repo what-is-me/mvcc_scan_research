@@ -28,6 +28,13 @@ if(MSVC)
 else()
   target_compile_options(mvcc_options INTERFACE
       -Wall -Wextra -Wpedantic -Wshadow -Wnon-virtual-dtor)
+  # MinGW 运行时 DLL（libstdc++ 等）按 PATH 解析，PATH 上若有别的发行版
+  # （如 Strawberry Perl）会遮蔽正确版本，启动时报 ENTRYPOINT_NOT_FOUND。
+  # 全静态链接让 exe 自包含，不依赖 PATH；实验机不用配置任何环境。
+  # 只对 MinGW 生效：Linux 上 -static 与 sanitizer 不兼容。
+  if(MINGW)
+    target_link_options(mvcc_options INTERFACE -static)
+  endif()
 endif()
 
 # TSan 在 Windows 上没有可用运行时，并发测试要到 Linux/WSL 下用同一份脚本
@@ -47,8 +54,10 @@ if(MVCC_SANITIZER)
 endif()
 
 # CONFIGURE_DEPENDS 让新增或删除 .cpp 时自动重新配置，不用改本文件。
+# main.cpp 是实验入口，不进核心库（否则 mvcc_tests 也会链进一个 main）。
 file(GLOB_RECURSE MVCC_CORE_SOURCES CONFIGURE_DEPENDS
      "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+list(FILTER MVCC_CORE_SOURCES EXCLUDE REGEX "/src/main/main\\.cpp$")
 list(SORT MVCC_CORE_SOURCES)
 
 if(MVCC_CORE_SOURCES)
@@ -61,6 +70,10 @@ else()
   target_include_directories(mvcc_core INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   target_link_libraries(mvcc_core INTERFACE mvcc_options)
 endif()
+
+# 实验入口：读配置、装配 Env、跑一轮、写 JSON。
+add_executable(mvcc_exp src/main/main.cpp)
+target_link_libraries(mvcc_exp PRIVATE mvcc_core)
 
 file(GLOB_RECURSE MVCC_TEST_SOURCES CONFIGURE_DEPENDS
      "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")

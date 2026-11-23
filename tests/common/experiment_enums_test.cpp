@@ -7,7 +7,7 @@
 // 建 KeyMapper）必然是这个场景。
 #include "common/config.h"
 #include "scan/table_scanner.h"
-#include "workload/key_mapper.h"
+#include "tp/key_mapper.h"
 
 namespace mvcc {
 namespace {

@@ -14,7 +14,7 @@
 #include "storage/table_layout.h"
 #include "txn/timestamp_manager.h"
 #include "txn/undo_log.h"
-#include "workload/tp_runner.h"
+#include "tp/tp_runner.h"
 
 #include "../buffer/memory_page_file.h"
 
@@ -76,7 +76,7 @@ TEST(TpWorkload, TerminalStateMatchesReplayOracle) {
     config.threads = kThreads;
     config.rows_per_txn = rows_per_txn;
     config.txns_per_thread = kTxnsPerThread;
-    config.zipf_theta = 0.8;
+    config.key_dist = KeyDist::kZipf08;
     config.mapping = KeyMapping::kScattered;
 
     const TpOutcome outcome =
@@ -116,7 +116,7 @@ TEST(TpWorkload, HeadMappingTouchesFewerPages) {
     config.threads = kThreads;
     config.rows_per_txn = 1;
     config.txns_per_thread = kTxnsPerThread;
-    config.zipf_theta = 0.8;
+    config.key_dist = KeyDist::kZipf08;
     config.mapping = mapping;
     RunTp(env.base, env.undo, env.layout, env.allocator, env.timestamps, config);
     return env.base.stats().physical_reads;
@@ -145,7 +145,7 @@ TEST(TpWorkload, MidRunScansMatchReplayOracle) {
   config.threads = 2;
   config.rows_per_txn = 1;
   config.txns_per_thread = 40000;
-  config.zipf_theta = 0.8;
+  config.key_dist = KeyDist::kZipf08;
   config.mapping = KeyMapping::kScattered;
 
   const KeyMapper mapper(env.layout.row_count(), config.mapping, config.seed);
@@ -168,7 +168,7 @@ TEST(TpWorkload, MidRunScansMatchReplayOracle) {
   for (size_t thread = 0; thread < config.threads; ++thread) {
     workers.emplace_back([&, thread] {
       RunTpWorker(env.base, env.undo, env.layout, env.allocator, env.timestamps, mapper,
-                  config, thread, partial[thread]);
+                  config, thread, nullptr, partial[thread]);
     });
   }
   for (std::thread& worker : workers) worker.join();
@@ -209,7 +209,7 @@ TEST(TpWorkload, AllScanPoliciesAgreeUnderConcurrentTp) {
   config.threads = 3;
   config.rows_per_txn = 4;
   config.txns_per_thread = 8000;
-  config.zipf_theta = 0.8;
+  config.key_dist = KeyDist::kZipf08;
   config.mapping = KeyMapping::kScattered;
 
   const KeyMapper mapper(env.layout.row_count(), config.mapping, config.seed);
@@ -221,7 +221,7 @@ TEST(TpWorkload, AllScanPoliciesAgreeUnderConcurrentTp) {
   for (size_t thread = 0; thread < config.threads; ++thread) {
     workers.emplace_back([&, thread] {
       RunTpWorker(env.base, env.undo, env.layout, env.allocator, env.timestamps, mapper, config,
-                  thread, partial[thread]);
+                  thread, nullptr, partial[thread]);
       running.fetch_sub(1, std::memory_order_release);
     });
   }
@@ -257,6 +257,73 @@ TEST(TpWorkload, AllScanPoliciesAgreeUnderConcurrentTp) {
     EXPECT_EQ(result.chain_hops, baseline.chain_hops);
     EXPECT_EQ(result.checksum, baseline.checksum);
   }
+}
+
+// 实验按"时长"而不是事务数结束：stop 旗标在事务之间检查。record_log=false
+// 时不攒提交日志（benchmark 用不到），延迟直方图始终记录。
+TEST(TpWorkload, WorkerStopsOnFlagAndSkipsCommitLog) {
+  Env env(2400);
+
+  TpConfig config;
+  config.threads = 2;
+  config.rows_per_txn = 1;
+  config.txns_per_thread = 1'000'000'000ull;
+  config.key_dist = KeyDist::kUniform;
+  config.record_log = false;
+  const KeyMapper mapper(env.layout.row_count(), config.mapping, config.seed);
+
+  std::atomic<bool> stop{false};
+  std::vector<TpOutcome> partial(config.threads);
+  std::vector<std::thread> workers;
+  for (size_t thread = 0; thread < config.threads; ++thread) {
+    workers.emplace_back([&, thread] {
+      RunTpWorker(env.base, env.undo, env.layout, env.allocator, env.timestamps, mapper, config,
+                  thread, &stop, partial[thread]);
+    });
+  }
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  stop.store(true, std::memory_order_release);
+  for (std::thread& worker : workers) worker.join();
+
+  const TpOutcome merged = MergeTpOutcomes(partial);
+  EXPECT_GT(merged.committed, 0u);
+  EXPECT_EQ(merged.commits.size(), 0u);           // record_log=false
+  EXPECT_GT(merged.latency.count(), 0u);          // 延迟始终记录
+}
+
+// 键分布通过 TpConfig::key_dist 进入负载层。调度决定不了采样序列（种子固定），
+// 冲突只让个别事务缺席，所以"头部 1% 行吃掉多少比例的更新"是稳定的接线信号：
+// head 映射下 zipf-0.8 约 20%~28%，均匀分布约 1%，差距五倍以上。
+TEST(TpWorkload, KeyDistWiringConcentratesUpdatesOnTheHeadRows) {
+  const auto run = [](KeyDist dist) {
+    Env env(2400);
+    TpConfig config;
+    config.threads = kThreads;
+    config.rows_per_txn = 1;
+    config.txns_per_thread = kTxnsPerThread;
+    config.key_dist = dist;
+    config.mapping = KeyMapping::kHead;
+    return RunTp(env.base, env.undo, env.layout, env.allocator, env.timestamps, config);
+  };
+
+  const TableLayout layout(kPageSize, kRowSize, kTableRows);
+  const auto hot_updates = [&layout](const TpOutcome& outcome) {
+    const size_t cutoff = layout.row_count() / 100;  // 前 1% 的行
+    size_t hot = 0;
+    for (const CommitEntry& entry : outcome.commits) {
+      if (layout.LinearRow(entry.row) < cutoff) ++hot;
+    }
+    return hot;
+  };
+
+  const size_t uniform_hot = hot_updates(run(KeyDist::kUniform));
+  const size_t zipf_hot = hot_updates(run(KeyDist::kZipf08));
+  const size_t attempts = kThreads * kTxnsPerThread;
+
+  EXPECT_LT(uniform_hot, attempts / 50);   // 期望约 1%
+  EXPECT_GT(zipf_hot, attempts / 10);      // 期望约 20%~28%
+  EXPECT_GT(zipf_hot, uniform_hot * 5);
 }
 
 }  // namespace

@@ -606,6 +606,22 @@ undo 文件容量上限 ≥ 估算值；每事务行数 ≤ 基表池帧数—�
   0–1 小数；计数为整数。
 - 跨实验的横向汇总不属系统功能，需要时由脚本从这批 JSON 文件生成。
 
+实验入口与装配（`src/main`）：
+
+- 入口 `mvcc_exp [config文件] [key=value ...] [--experiment-id=ID]`。配置文件
+  默认 `config/default.cfg`，命令行逐项覆盖，解析与校验复用 Config。
+- `experiment_id` 默认取启动时刻（`YYYYMMDD_HHMMSS`），可用命令行指定以便
+  重跑同一编号；结果文件为 `results_dir/exp_<id>.json`，表文件在实验结束后
+  删除——每轮实验都重建（§6），JSON 是唯一交付物。
+- 顶层池指标是**各次扫描增量的累加**，与 details 逐列求和一致（扫描自己
+  发出的请求；并发 TP 的池流量不进 JSON，TP 侧只报吞吐、延迟与冲突率）。
+  命中率的分母含这些增量对应的逻辑未命中。
+- `table_rows` 落实际行数（行数上取整到页边界后的值，§6）；oracle、扫描与
+  JSON 三处一致。
+- TP 事务延迟分位数由对数分桶直方图统计（桶宽 2^(1/8) 倍增长，桶内线性
+  插值）：每事务一条延迟会随实验时长无界增长，直方图内存固定、跨线程合并
+  就是逐桶相加，误差小于桶宽。冲突事务的延迟同样计入。
+
 ~~~
 顶层字段（按书写顺序，details 之前）：
   experiment_id, scan_policy, replacer, page_size_kb, row_size_b,
