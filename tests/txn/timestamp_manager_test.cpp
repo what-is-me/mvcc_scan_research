@@ -128,14 +128,17 @@ TEST(TimestampManager, ReaderWaitsWhileSlotIsReserved) {
 
   std::promise<void> finish;
   std::future<void> finished = finish.get_future();
-  Timestamp commit_ts = 0;
+  // 原子化：提交线程在闸口释放之后才写入，主线程在 join 之前读它，
+  // 非原子变量在这两者之间没有任何 happens-before 边（TSan 会报竞争）。
+  std::atomic<Timestamp> commit_ts{0};
   std::thread committer([&] {
     const CommitScope scope(manager, 0);
-    commit_ts = scope.commit_ts();
+    commit_ts.store(scope.commit_ts(), std::memory_order_relaxed);
     finished.wait();
   });
   ASSERT_TRUE(gate.WaitUntilBlocked());
-  ASSERT_EQ(commit_ts, Timestamp{0});
+  // 提交线程还挡在闸口，尚未取号，commit_ts 保持初值。
+  ASSERT_EQ(commit_ts.load(std::memory_order_relaxed), Timestamp{0});
 
   std::atomic<bool> returned{false};
   Timestamp observed = 0;
@@ -151,11 +154,16 @@ TEST(TimestampManager, ReaderWaitsWhileSlotIsReserved) {
   reader.join();
 
   EXPECT_TRUE(returned.load());
-  EXPECT_EQ(commit_ts, Timestamp{1});
-  EXPECT_EQ(observed, commit_ts);
+  // 槽位停在"发布但未释放"：读者在发布点被唤醒，读到的正是刚发布的号。
+  EXPECT_EQ(observed, Timestamp{1});
 
   finish.set_value();
   committer.join();
+
+  // join 与提交线程建立 happens-before，读它写入的 commit_ts 才无竞争，
+  // 且此刻写入必然已发生，断言不会读到初值。
+  EXPECT_EQ(commit_ts.load(std::memory_order_relaxed), Timestamp{1});
+  EXPECT_EQ(observed, commit_ts.load(std::memory_order_relaxed));
   EXPECT_EQ(manager.ReadTimestamp(), Timestamp{2});
 }
 
