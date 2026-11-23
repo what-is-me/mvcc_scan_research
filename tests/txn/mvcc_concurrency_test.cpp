@@ -96,6 +96,38 @@ uint64_t ExpectedChecksum(const std::vector<uint32_t>& state, size_t data_size) 
   return checksum;
 }
 
+// §12 竞态放大的闸门：第 threshold 次钩子触发时挂起，直到主线程放行。
+// WaitReached 带时限——钩子被改坏（不再触发）时测试失败而不是挂死。
+class Gate {
+ public:
+  explicit Gate(int threshold) : threshold_(threshold) {}
+
+  void Fire() {
+    if (fired_.fetch_add(1, std::memory_order_acq_rel) + 1 < threshold_) return;
+    reached_.store(true, std::memory_order_release);
+    while (!release_.load(std::memory_order_acquire)) std::this_thread::yield();
+  }
+
+  bool WaitReached() {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!reached_.load(std::memory_order_acquire)) {
+      if (std::chrono::steady_clock::now() > deadline) return false;
+      std::this_thread::yield();
+    }
+    return true;
+  }
+
+  void Release() { release_.store(true, std::memory_order_release); }
+
+ private:
+  int threshold_;
+  std::atomic<int> fired_{0};
+  std::atomic<bool> reached_{false};
+  std::atomic<bool> release_{false};
+};
+
+void FireGate(void* context, TransactionHookPoint) { static_cast<Gate*>(context)->Fire(); }
+
 // first-updater-wins 必须由这里显式覆盖：靠调度去撞冲突并不可靠（单事务只有
 // 几微秒，四个线程可能整段跑在同一个时间片里完全串行）。两个事务在同一行上
 // 前后脚开始，read_ts 相同，先到的置锁，后到的必须被拒。
@@ -225,6 +257,114 @@ TEST(MvccConcurrency, ConcurrentUpdatesAndScansMatchReplayOracle) {
     EXPECT_EQ(ChecksumBytes(visible), ChecksumBytes(ValueFor(record.serial, env.layout.data_size())))
         << "row " << record.row << " commit_ts " << record.ts;
   }
+}
+
+// 提交应用窗口：闸在第二行写回前合上——row_a 已带 commit_ts，row_b 还锁着。
+// §8 的 min 机制必须让此刻开始的读者取到 read_ts = t1 的 commit_ts，两行都沿
+// undo 链回溯到旧值，快照完整落在 T1 之前；写冲突检测在窗口内同样成立。
+TEST(MvccConcurrency, CommitApplyWindowKeepsSnapshotConsistent) {
+  Env env;
+  TxnContext context_t1(2, env.layout.data_size());
+  TxnContext context_t2(1, env.layout.data_size());
+  UndoAppender appender_t1(env.allocator, env.layout);
+  UndoAppender appender_t2(env.allocator, env.layout);
+
+  Gate gate(2);
+  Txn t1(env.base, env.undo, env.layout, appender_t1, env.timestamps, 0, context_t1,
+         TransactionHooks(&FireGate, &gate));
+  t1.Begin();
+  const RowId row_a = env.layout.RowIdAt(3);
+  const RowId row_b = env.layout.RowIdAt(4);
+  const std::vector<std::byte> fresh = ValueFor(1, env.layout.data_size());
+  ASSERT_EQ(t1.Update(row_a, fresh), UpdateOutcome::kApplied);
+  ASSERT_EQ(t1.Update(row_b, fresh), UpdateOutcome::kApplied);
+
+  std::thread committer([&] { t1.Commit(); });
+  EXPECT_TRUE(gate.WaitReached()) << "钩子未触发：后续断言基于已完成的提交/回滚";
+
+  // row_a 已写回（锁已清、version = commit_ts），但 read_ts 不大于它——必须
+  // 走链读到旧值；row_b 还锁着，同样走链。
+  std::vector<std::byte> visible(env.layout.data_size());
+  const Timestamp snapshot_ts = env.timestamps.ReadTimestamp();
+  ReadVisible(env.base, env.undo, env.layout, row_a, snapshot_ts, AccessMode::kNormal, visible);
+  EXPECT_EQ(ChecksumBytes(visible), 0u) << "已写回的 row_a 在窗口内不可见";
+  ReadVisible(env.base, env.undo, env.layout, row_b, snapshot_ts, AccessMode::kNormal, visible);
+  EXPECT_EQ(ChecksumBytes(visible), 0u) << "未写回的 row_b 读到旧值";
+
+  // 窗口内写冲突检测照常：row_a 靠 ts 比较（版本 >= read_ts），row_b 靠锁位。
+  Txn t2(env.base, env.undo, env.layout, appender_t2, env.timestamps, 1, context_t2);
+  t2.Begin();
+  EXPECT_EQ(t2.Update(row_a, ValueFor(2, env.layout.data_size())), UpdateOutcome::kConflict);
+  EXPECT_EQ(t2.Update(row_b, ValueFor(2, env.layout.data_size())), UpdateOutcome::kConflict);
+
+  gate.Release();
+  committer.join();
+
+  // 提交完成后新快照看到两个新版本；T2 重试正常更新并提交。
+  const Timestamp after_ts = env.timestamps.ReadTimestamp();
+  ASSERT_GT(after_ts, snapshot_ts);
+  ReadVisible(env.base, env.undo, env.layout, row_a, after_ts, AccessMode::kNormal, visible);
+  EXPECT_EQ(ChecksumBytes(visible), ChecksumBytes(fresh));
+  ReadVisible(env.base, env.undo, env.layout, row_b, after_ts, AccessMode::kNormal, visible);
+  EXPECT_EQ(ChecksumBytes(visible), ChecksumBytes(fresh));
+
+  t2.Begin();
+  ASSERT_EQ(t2.Update(row_a, ValueFor(2, env.layout.data_size())), UpdateOutcome::kApplied);
+  t2.Commit();
+  ReadVisible(env.base, env.undo, env.layout, row_a, env.timestamps.ReadTimestamp(),
+              AccessMode::kNormal, visible);
+  EXPECT_EQ(ChecksumBytes(visible),
+            ChecksumBytes(ValueFor(2, env.layout.data_size())));
+}
+
+// 回滚窗口：闸在第一行清锁前合上，写集两行整段持锁。读者沿 undo 链读到旧值；
+// 回滚完成后锁位全清，后续更新不受残留锁位影响。
+TEST(MvccConcurrency, RollbackWindowResolvesLockedRowsViaUndoChain) {
+  Env env;
+  TxnContext context_t1(2, env.layout.data_size());
+  TxnContext context_t2(1, env.layout.data_size());
+  UndoAppender appender_t1(env.allocator, env.layout);
+  UndoAppender appender_t2(env.allocator, env.layout);
+
+  Gate gate(1);
+  Txn t1(env.base, env.undo, env.layout, appender_t1, env.timestamps, 0, context_t1,
+         TransactionHooks(&FireGate, &gate));
+  t1.Begin();
+  const RowId row_a = env.layout.RowIdAt(5);
+  const RowId row_b = env.layout.RowIdAt(6);
+  const std::vector<std::byte> fresh = ValueFor(1, env.layout.data_size());
+  ASSERT_EQ(t1.Update(row_a, fresh), UpdateOutcome::kApplied);
+  ASSERT_EQ(t1.Update(row_b, fresh), UpdateOutcome::kApplied);
+
+  std::thread aborter([&] { t1.Abort(); });
+  EXPECT_TRUE(gate.WaitReached()) << "钩子未触发：后续断言基于已完成的提交/回滚";
+
+  // 两行都还锁着：读者必须沿 undo 链回溯到旧值，不能被锁位挡住或读到半态。
+  std::vector<std::byte> visible(env.layout.data_size());
+  const Timestamp snapshot_ts = env.timestamps.ReadTimestamp();
+  ReadVisible(env.base, env.undo, env.layout, row_a, snapshot_ts, AccessMode::kNormal, visible);
+  EXPECT_EQ(ChecksumBytes(visible), 0u);
+  ReadVisible(env.base, env.undo, env.layout, row_b, snapshot_ts, AccessMode::kNormal, visible);
+  EXPECT_EQ(ChecksumBytes(visible), 0u);
+
+  gate.Release();
+  aborter.join();
+
+  // 回滚不恢复数据区（Update 阶段就没写过数据），只清锁位；值保持旧值。
+  const Timestamp after_ts = env.timestamps.ReadTimestamp();
+  ReadVisible(env.base, env.undo, env.layout, row_a, after_ts, AccessMode::kNormal, visible);
+  EXPECT_EQ(ChecksumBytes(visible), 0u);
+  ReadVisible(env.base, env.undo, env.layout, row_b, after_ts, AccessMode::kNormal, visible);
+  EXPECT_EQ(ChecksumBytes(visible), 0u);
+
+  Txn t2(env.base, env.undo, env.layout, appender_t2, env.timestamps, 1, context_t2);
+  t2.Begin();
+  ASSERT_EQ(t2.Update(row_a, ValueFor(2, env.layout.data_size())), UpdateOutcome::kApplied)
+      << "回滚后不得残留锁位";
+  t2.Commit();
+  ReadVisible(env.base, env.undo, env.layout, row_a, env.timestamps.ReadTimestamp(),
+              AccessMode::kNormal, visible);
+  EXPECT_EQ(ChecksumBytes(visible), ChecksumBytes(ValueFor(2, env.layout.data_size())));
 }
 
 }  // namespace

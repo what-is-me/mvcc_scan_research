@@ -32,6 +32,27 @@ inline std::ostream& operator<<(std::ostream& out, UpdateOutcome outcome) {
   return out << "UpdateOutcome{?}";
 }
 
+enum class TransactionHookPoint { kInCommitApply, kInRollback };
+
+// 确定性交错注入点（§12 竞态放大）：生产路径为 nullptr，代价是一次可预测
+// 分支。kInCommitApply 在提交逐行写回之前、kInRollback 在回滚逐行清锁之前
+// 触发——各每行一次，测试据此把"写集只写了一半 / 锁只清了一半"的微秒窗口
+// 拉成确定性时序，不靠调度巧合。与 PoolHooks / TimestampHooks 同一形状。
+class TransactionHooks {
+ public:
+  TransactionHooks() = default;
+  TransactionHooks(void (*notify)(void*, TransactionHookPoint), void* context)
+      : notify_(notify), context_(context) {}
+
+  void Fire(TransactionHookPoint point) const {
+    if (notify_ != nullptr) notify_(context_, point);
+  }
+
+ private:
+  void (*notify_)(void*, TransactionHookPoint) = nullptr;
+  void* context_ = nullptr;
+};
+
 // 一次事务的编排（§9.3–§9.6）。生命周期短；析构时若仍 active 则自动回滚。
 // 它持有的都是 Env 组件的引用，不拥有任何东西。
 template <typename BasePool, typename UndoPool>
@@ -39,14 +60,15 @@ class Transaction {
  public:
   Transaction(BasePool& base_pool, UndoPool& undo_pool, const TableLayout& layout,
               UndoAppender& appender, TimestampManager& timestamps, size_t slot,
-              TxnContext& context)
+              TxnContext& context, TransactionHooks hooks = {})
       : base_pool_(&base_pool),
         undo_pool_(&undo_pool),
         layout_(&layout),
         appender_(&appender),
         timestamps_(&timestamps),
         slot_(slot),
-        context_(&context) {}
+        context_(&context),
+        hooks_(hooks) {}
 
   ~Transaction() {
     if (!active_) return;
@@ -136,6 +158,9 @@ class Transaction {
 
     // 页面已驻留且被 pin，下面的 Fix 只是命中，不会再读盘，也就不会抛出。
     for (size_t index = 0; index < context_->size(); ++index) {
+      // §12 竞态放大：写回这一行之前挂起，制造"前面几行已带 commit_ts、
+      // 后面的行还锁着"的确定性窗口。
+      hooks_.Fire(TransactionHookPoint::kInCommitApply);
       RowGuard<BasePool> guard(*base_pool_, *layout_, context_->row_at(index));
       // 写集里的每一行从更新那一刻起就由本事务置锁，直到这里写回 commit_ts。
       // 锁位若已不在，说明有人越过了冲突检查改过这一行，此时覆盖会永久抹掉
@@ -156,6 +181,8 @@ class Transaction {
     assert(active_);
     assert(!committed_ && "取号之后回滚只会留下半个写集");
     for (size_t index = 0; index < context_->size(); ++index) {
+      // §12 竞态放大：清这一行的锁位之前挂起，制造"写集整段持锁"的窗口。
+      hooks_.Fire(TransactionHookPoint::kInRollback);
       RowGuard<BasePool> guard(*base_pool_, *layout_, context_->row_at(index));
       const VersionStamp current = guard.row().version();
       assert(current.locked());
@@ -198,6 +225,7 @@ class Transaction {
   TimestampManager* timestamps_;
   size_t slot_;
   TxnContext* context_;
+  TransactionHooks hooks_;
   Timestamp commit_ts_ = 0;
   bool active_ = false;
   bool committed_ = false;
