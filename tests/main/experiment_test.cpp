@@ -13,13 +13,17 @@ namespace {
 
 namespace fs = std::filesystem;
 
+// 冒烟配置的每个维度只服务一件事：让"undo 淘汰写回"在极少量的更新尝试内
+// 必然发生，CI runner 的停顿也挡不住它。理由见 TinyRun 的说明。
 Config TinyConfig(const fs::path& dir) {
   Config config;
-  config.table_rows = 512;  // 64 KB 页 / 128 B 行 = 恰好 1 页
+  config.table_rows = 512;   // 64 KB 页 / 512 B 行 = 128 行/页 → 4 页
+  config.row_size_b = 512;   // undo 记录与基表行同宽（§4）：512 B/条 → 每页 128 条
   config.base_pool_mb = 1;
   config.undo_pool_mb = 1;
   config.undo_capacity_gb = 1;
   config.tp_threads = 2;
+  config.rows_per_txn = 16;  // 校验上限（≤ 基表池帧数）：一次尝试最多占 16 个 undo 槽位
   config.key_dist = KeyDist::kUniform;
   config.scan_interval_ms = 200;
   config.duration_s = 1;
@@ -154,6 +158,17 @@ TEST(ExperimentJson, EscapesTheExperimentId) {
 // 端到端冒烟：真实文件 + direct I/O，配置取最小可跑规模。跑通即验证装配
 // 顺序、线程编排与 JSON 落盘；benchmark 不做正确性校验（§12），断言只盯
 // 计数与文件形状。
+//
+// 断言不得隐含机器速度下限——CI runner 的调度停顿可达数百毫秒，本用例在
+// CI 上挂过两次，两次都是这条：
+// - scan_count 只断言 ≥ 1。AP 线程能否在 1 s 内被调度多次是调度运气，不是
+//   系统性质；相邻扫描起始间隔的语义由 ScanIntervalIsMeasuredBetweenScanStarts
+//   专项断言（那边间隔取扫描耗时的数倍，余量以数量级计）。
+// - undo_file_mb_end > 0 要求跑出至少一次淘汰写回。undo 记录与基表行同宽
+//   （§4），undo 池容量 = 池字节 / 行宽；行宽 128 B 时容量 8192 槽，CI 停顿
+//   窗口内根本填不满。行宽提到 512 B、rows_per_txn 提到校验上限 16，把门槛
+//   压到 ~200 次更新尝试——冲突事务同样消费 undo 槽位（Reserve 先于冲突
+//   检查，§9.3），所以这条门槛按 attempts 计，必然跨过。
 TEST(Experiment, TinyRunProducesConsistentSummaryAndJson) {
   const fs::path dir = fs::temp_directory_path() / "mvcc_exp_smoke";
   fs::remove_all(dir);
@@ -164,7 +179,7 @@ TEST(Experiment, TinyRunProducesConsistentSummaryAndJson) {
 
   EXPECT_GT(summary.actual_table_rows, 0u);
   EXPECT_EQ(summary.actual_table_rows, 512u);
-  EXPECT_GT(summary.scan_count, 1u);
+  EXPECT_GE(summary.scan_count, 1u);
   EXPECT_GT(summary.tp_throughput_txn_per_s, 0.0);
   EXPECT_GT(summary.tp_latency_ms_p50, 0.0);
   EXPECT_GT(summary.undo_file_mb_end, 0.0);

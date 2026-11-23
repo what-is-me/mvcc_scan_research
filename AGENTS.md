@@ -680,6 +680,13 @@ Windows 只作本地开发，CI 全部在 Linux 上跑（§6 的 POSIX O_DIRECT 
   §6/I7 的数据区乐观读是有意竞态（撕裂读取由版本戳判定整份丢弃），TSan
   无法理解该协议，用 `tsan_suppressions.txt` 按读端符号标注，清单之外
   的 race 一律视为真缺陷使任务变红。
+- 计时类断言不得隐含机器速度下限：shared runner 的调度停顿可达数百毫秒
+  （TinyRun 在 CI 上挂过两次——一次只跑出 1 次扫描，一次 undo 文件 0 页）。
+  多轮扫描的节拍断言归 interval 专项用例（间隔取扫描耗时的数倍，余量以
+  数量级计），冒烟只断言 scan_count ≥ 1；"触发一次 undo 淘汰写回"所需的
+  工作量按 attempts 计——冲突事务同样消费 undo 槽位（Reserve 先于冲突
+  检查，§9.3），冒烟配置用 512 B 行宽 + rows_per_txn=16 把这条门槛压到
+  约两百次尝试，比首个配置低两个数量级。
 - **benchmark 手动触发**（workflow_dispatch）：先跑单测守门，再按输入的
   时长/行数/undo 容量跑完整 4 × 5 矩阵（`--matrix`，§12），汇总脚本
   `scripts/summarize.py` 把这批 JSON 生成 Markdown 对照报告，写入
