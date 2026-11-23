@@ -261,8 +261,12 @@ TEST(TpWorkload, AllScanPoliciesAgreeUnderConcurrentTp) {
 
 // 实验按"时长"而不是事务数结束：stop 旗标在事务之间检查。record_log=false
 // 时不攒提交日志（benchmark 用不到），延迟直方图始终记录。
+// 唯一按时长满跑的用例：内存文件无 I/O，双线程实测约 80 万事务/秒，100ms
+// 就能烧掉 ~2500 页 undo（页号全局递增、无上界，容量保证属配置校验层）。
+// undo 页数必须按这个速率配足余量，否则写回越界——MemoryPageFile 的边界
+// 检查会把这类配错明确报出来，而不是让进程偶发踩堆崩溃。
 TEST(TpWorkload, WorkerStopsOnFlagAndSkipsCommitLog) {
-  Env env(2400);
+  Env env(4096);  // 4096 页 × 32 条/页 = 13 万条记录，60ms 满跑上界（4.8 万条）的 2.7 倍
 
   TpConfig config;
   config.threads = 2;
@@ -282,7 +286,7 @@ TEST(TpWorkload, WorkerStopsOnFlagAndSkipsCommitLog) {
     });
   }
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
   stop.store(true, std::memory_order_release);
   for (std::thread& worker : workers) worker.join();
 
