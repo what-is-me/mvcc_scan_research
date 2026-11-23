@@ -206,20 +206,27 @@ TEST(Experiment, TinyRunProducesConsistentSummaryAndJson) {
   fs::remove_all(dir);
 }
 
-// §11：间隔是相邻两次扫描起始时刻之差，不是"结束后再等"。断言用本次扫描
-// 自己的耗时自校准：新语义下起始间隔 = max(扫描耗时, 间隔)，恒小于
-// "扫描耗时 + 间隔"；旧实现（从扫描结束起算）恰好等于后者，5 ms 余量把它
-// 与睡眠切片的抖动区分开。
+// §11：间隔是相邻两次扫描起始时刻之差，不是"结束后再等"。
+//
+// 区分度完全来自上一轮的扫描耗时 prev：起始起算的起始间隔 = max(prev, 间隔)，
+// 结束起算 = prev + 间隔。两者只在 prev < 间隔的轮次可分辨，差距 = prev。
+// 因此间隔必须取扫描耗时的数倍，让每一轮都落在可分辨区域，且差距
+// （≈ 扫描耗时，百毫秒级）远大于两轮之间那条调度路径的偶发毛刺——扫描
+// 线程跑满一个时间片后被换出，恢复延迟可达几十毫秒。间隔贴着扫描耗时的
+// 时候（扫描 > 间隔）两种实现行为相同、断言余量全部暴露给调度毛刺，
+// 这正是这条用例曾经偶发失败的原因。
+// 末尾的 5 ms 不再是给唤醒过冲的余量，而是保证"结束后再等"的实现
+// （delta ≥ prev + 间隔，只会更大）必定落网。
 TEST(Experiment, ScanIntervalIsMeasuredBetweenScanStarts) {
   Config config;
-  config.table_rows = 800000;  // 1563 页：一次扫描明显长于毫秒级，间隔可分辨
+  config.table_rows = 800000;  // 1563 页：本机实测扫描约 100~260 ms
   config.base_pool_mb = 16;
   config.undo_pool_mb = 8;
   config.undo_capacity_gb = 1;
   config.tp_threads = 2;
   config.key_dist = KeyDist::kUniform;
-  config.scan_interval_ms = 100;
-  config.duration_s = 1;
+  config.scan_interval_ms = 600;  // 数倍于扫描耗时：每一轮都落在可分辨区域
+  config.duration_s = 2;
   config.results_dir = (std::filesystem::temp_directory_path() / "mvcc_exp_interval").string();
 
   std::filesystem::remove_all(config.results_dir);
