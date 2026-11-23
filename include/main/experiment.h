@@ -64,6 +64,13 @@ struct ExperimentSummary {
 // 表文件，返回聚合结果。配置非法时抛 std::invalid_argument。
 ExperimentSummary RunExperiment(const Config& config, const std::string& experiment_id);
 
+// 串行跑完整个矩阵（扫描策略 4 × 替换策略 5，按枚举声明顺序），每轮
+// experiment_id = 前缀_策略名_替换器名，并立即写出 exp_<id>.json——已完成
+// 的轮次不因后续轮次失败而丢失。某轮抛出即终止矩阵，异常继续传播。
+// 其余维度沿用 base_config；矩阵不聚合，横向汇总由脚本从 JSON 生成（§12）。
+std::vector<ExperimentSummary> RunMatrix(const Config& base_config,
+                                         const std::string& experiment_prefix);
+
 // 手写序列化（§12：不引入第三方 JSON 库）。结构固定：顶层字段按规范顺序，
 // details 数组最后。path 的父目录必须已存在。
 void WriteExperimentJson(const ExperimentSummary& summary, const std::filesystem::path& path);

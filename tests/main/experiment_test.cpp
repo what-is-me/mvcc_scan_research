@@ -244,5 +244,48 @@ TEST(Experiment, RejectsInvalidConfigBeforeBuildingAnything) {
   EXPECT_THROW((void)RunExperiment(config, "bad"), std::invalid_argument);
 }
 
+// §13 步骤 10：矩阵运行。20 轮按枚举声明顺序逐个产出 JSON，id 编码策略组合，
+// 表文件每轮清理。每轮约 1 s（duration_s 下限），是套件里最贵的一条。
+TEST(Experiment, MatrixRunsEveryScanPolicyReplacerPair) {
+  const fs::path dir = fs::temp_directory_path() / "mvcc_exp_matrix";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+
+  Config config = TinyConfig(dir);
+  config.scan_interval_ms = 100;
+  const std::vector<ExperimentSummary> summaries = RunMatrix(config, "matrix");
+
+  ASSERT_EQ(summaries.size(), 4u * 5u);
+  const char* kScanPolicies[] = {"baseline", "hotfirst", "defer_chain", "defer_paged"};
+  const char* kReplacers[] = {"lru", "clock", "mru", "arc", "lru_k"};
+  size_t index = 0;
+  for (const char* policy : kScanPolicies) {
+    for (const char* replacer : kReplacers) {
+      const ExperimentSummary& summary = summaries[index];
+      const std::string expected_id = std::string("matrix_") + policy + "_" + replacer;
+      EXPECT_EQ(summary.experiment_id, expected_id) << "轮次 " << index;
+      EXPECT_GT(summary.scan_count, 0u) << expected_id;
+      EXPECT_FALSE(fs::exists(dir / (expected_id + "_base.tbl"))) << expected_id;
+      EXPECT_FALSE(fs::exists(dir / (expected_id + "_undo.tbl"))) << expected_id;
+      // 每轮 JSON 已落盘，id 与策略字段都指向同一轮。
+      const std::string text = ReadAll(dir / ("exp_" + expected_id + ".json"));
+      EXPECT_NE(text.find("\"experiment_id\": \"" + expected_id + "\""), std::string::npos)
+          << expected_id;
+      EXPECT_NE(text.find(std::string("\"scan_policy\": \"") + policy + "\""), std::string::npos)
+          << expected_id;
+      EXPECT_NE(text.find(std::string("\"replacer\": \"") + replacer + "\""), std::string::npos)
+          << expected_id;
+      ++index;
+    }
+  }
+  fs::remove_all(dir);
+}
+
+TEST(Experiment, RejectsInvalidMatrixConfigBeforeRunningAnything) {
+  Config config = TinyConfig(".");
+  config.rows_per_txn = 1'000'000;
+  EXPECT_THROW((void)RunMatrix(config, "bad"), std::invalid_argument);
+}
+
 }  // namespace
 }  // namespace mvcc

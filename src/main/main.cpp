@@ -29,8 +29,9 @@ std::string DefaultExperimentId() {
 }
 
 void PrintUsage() {
-  std::cerr << "用法: mvcc_exp [config文件] [key=value ...] [--experiment-id=ID]\n"
+  std::cerr << "用法: mvcc_exp [--matrix] [config文件] [key=value ...] [--experiment-id=ID]\n"
             << "  config文件默认为 config/default.cfg；key=value 覆盖其中一项。\n"
+            << "  --matrix 按 4×5 矩阵逐轮跑完，--experiment-id 作为各轮 id 的前缀。\n"
             << "  结果写入 results_dir 下的 exp_<id>.json。\n";
 }
 
@@ -44,6 +45,7 @@ int main(int argc, char** argv) {
   std::string config_path = "config/default.cfg";
   std::string experiment_id;
   bool explicit_id = false;
+  bool matrix = false;
   std::vector<std::pair<std::string, std::string>> overrides;
 
   for (int index = 1; index < argc; ++index) {
@@ -51,6 +53,10 @@ int main(int argc, char** argv) {
     if (arg.rfind("--experiment-id=", 0) == 0) {
       experiment_id = arg.substr(sizeof("--experiment-id=") - 1);
       explicit_id = true;
+      continue;
+    }
+    if (arg == "--matrix") {
+      matrix = true;
       continue;
     }
     if (arg.rfind("--", 0) == 0) {
@@ -92,16 +98,24 @@ int main(int argc, char** argv) {
   std::cout << "experiment_id = " << experiment_id << "\n";
 
   try {
-    const ExperimentSummary summary = RunExperiment(config, experiment_id);
-    const std::filesystem::path output =
-        std::filesystem::path(config.results_dir) / ("exp_" + experiment_id + ".json");
-    std::filesystem::create_directories(output.parent_path());
-    WriteExperimentJson(summary, output);
+    if (matrix) {
+      // 矩阵模式：RunMatrix 逐轮写出 exp_<id>.json，失败即终止（已完成各轮
+      // 已落盘）。experiment_id 在此处作为前缀使用。
+      const std::vector<ExperimentSummary> summaries = RunMatrix(config, experiment_id);
+      std::cout << "矩阵完成: " << summaries.size() << " 轮，结果目录 " << config.results_dir
+                << "\n";
+    } else {
+      const ExperimentSummary summary = RunExperiment(config, experiment_id);
+      const std::filesystem::path output =
+          std::filesystem::path(config.results_dir) / ("exp_" + experiment_id + ".json");
+      std::filesystem::create_directories(output.parent_path());
+      WriteExperimentJson(summary, output);
 
-    std::cout << "完成: 扫描 " << summary.scan_count << " 次，TP 吞吐 "
-              << static_cast<long long>(summary.tp_throughput_txn_per_s) << " txn/s，冲突率 "
-              << summary.write_conflict_rate << "\n";
-    std::cout << "结果文件: " << output.string() << "\n";
+      std::cout << "完成: 扫描 " << summary.scan_count << " 次，TP 吞吐 "
+                << static_cast<long long>(summary.tp_throughput_txn_per_s) << " txn/s，冲突率 "
+                << summary.write_conflict_rate << "\n";
+      std::cout << "结果文件: " << output.string() << "\n";
+    }
   } catch (const std::exception& ex) {
     std::cerr << "实验失败: " << ex.what() << "\n";
     return 2;

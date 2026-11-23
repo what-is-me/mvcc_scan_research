@@ -614,6 +614,11 @@ undo 文件容量上限 ≥ 估算值；每事务行数 ≤ 基表池帧数—�
 
 - 入口 `mvcc_exp [config文件] [key=value ...] [--experiment-id=ID]`。配置文件
   默认 `config/default.cfg`，命令行逐项覆盖，解析与校验复用 Config。
+- `--matrix` 使入口串行跑完整个矩阵（扫描策略 4 × 替换策略 5，按枚举声明
+  顺序），每轮 experiment_id = 前缀_策略名_替换器名，独立写出 exp_<id>.json；
+  `--experiment-id` 给定的是前缀，默认仍取启动时刻。某轮失败即终止矩阵：
+  已完成各轮的 JSON 已经落盘。矩阵只负责产出这批 JSON，跨实验的横向汇总
+  仍用脚本生成。
 - `experiment_id` 默认取启动时刻（`YYYYMMDD_HHMMSS`），可用命令行指定以便
   重跑同一编号；结果文件为 `results_dir/exp_<id>.json`，表文件在实验结束后
   删除——每轮实验都重建（§6），JSON 是唯一交付物。

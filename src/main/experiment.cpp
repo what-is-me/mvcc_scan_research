@@ -5,6 +5,8 @@
 #include <cmath>
 #include <exception>
 #include <filesystem>
+#include <iostream>
+#include <iterator>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -234,6 +236,45 @@ ExperimentSummary RunExperiment(const Config& config, const std::string& experim
       return RunExperimentWith<LruKReplacer>(config, experiment_id);
   }
   throw std::invalid_argument("unknown replacer");
+}
+
+// 矩阵的遍历顺序即枚举声明顺序（§12）；id 里的名字与 JSON 的枚举字段共用
+// ToString，不会出现两套拼写。
+constexpr ScanPolicy kMatrixScanPolicies[] = {
+    ScanPolicy::kBaseline, ScanPolicy::kHotFirst, ScanPolicy::kDeferChain, ScanPolicy::kDeferPaged};
+constexpr Replacer kMatrixReplacers[] = {
+    Replacer::kLru, Replacer::kClock, Replacer::kMru, Replacer::kArc, Replacer::kLruK};
+
+std::vector<ExperimentSummary> RunMatrix(const Config& base_config,
+                                         const std::string& experiment_prefix) {
+  // 只校验基准配置：矩阵内仅改扫描策略与替换策略，其余维度非法时 20 轮
+  // 全会失败，启动即拒。
+  if (const std::string error = base_config.Validate(); !error.empty()) {
+    throw std::invalid_argument("invalid config: " + error);
+  }
+
+  std::vector<ExperimentSummary> summaries;
+  summaries.reserve(std::size(kMatrixScanPolicies) * std::size(kMatrixReplacers));
+  for (const ScanPolicy policy : kMatrixScanPolicies) {
+    for (const Replacer replacer : kMatrixReplacers) {
+      Config config = base_config;
+      config.scan_policy = policy;
+      config.replacer = replacer;
+      const std::string id =
+          experiment_prefix + "_" + ToString(policy) + "_" + ToString(replacer);
+
+      std::cout << "矩阵 " << summaries.size() + 1 << '/' << std::size(kMatrixScanPolicies) *
+                                                                        std::size(kMatrixReplacers)
+                << ": " << id << std::endl;
+      summaries.push_back(RunExperiment(config, id));
+
+      const std::filesystem::path output =
+          std::filesystem::path(config.results_dir) / ("exp_" + id + ".json");
+      std::filesystem::create_directories(output.parent_path());
+      WriteExperimentJson(summaries.back(), output);
+    }
+  }
+  return summaries;
 }
 
 double Percentile(std::vector<double> values, double p) {
