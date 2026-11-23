@@ -57,10 +57,14 @@ class ArcReplacer {
   size_t t1_size_ = 0;
   size_t t2_size_ = 0;
 
-  // OnMiss 判定出的"本次缺页命中了幽灵"。幽灵条目可能在本轮 PushGhost 的
-  // 容量清理中被摘掉——要装入的页常常正是最老的幽灵——OnLoad 再查 ghost_
-  // 就会把它当成首次装入、退回 T1，层位白白退化一次。
-  PageId pending_page_ = kNoGhost;
+  // OnMiss 判定出的"本次缺页命中了幽灵"，按页记录。不能塞进单个待定槽：
+  // OnMiss（锁内）与消费它的 OnLoad（锁外 I/O 完成之后）隔着完整的无锁窗口，
+  // 并发 Fix 会互相覆盖、预取批的多个判定只活下来最后一个。幽灵条目也可能
+  // 在本轮 PushGhost 的容量清理中被摘掉——要装入的页常常正是最老的幽灵
+  // ——OnLoad 再查 ghost_ 就会把它当成首次装入、退回 T1，层位白白退化一次。
+  // 每次缺页都重新赋值：放弃装载的残留会被同一页的下一次 OnMiss 覆盖，
+  // 而 OnLoad(page) 总是紧跟在同一次缺页的 OnMiss(page) 之后。
+  FixedArray<bool> promote_;
 
   FixedArray<uint8_t> ghost_;
   FixedArray<PageId> ghost_prev_;

@@ -18,6 +18,7 @@ ArcReplacer::ArcReplacer(size_t frame_count, size_t page_count)
       next_(frame_count),
       tier_(frame_count),
       cold_(frame_count),
+      promote_(page_count),
       ghost_(page_count),
       ghost_prev_(page_count),
       ghost_next_(page_count),
@@ -34,6 +35,7 @@ ArcReplacer::ArcReplacer(size_t frame_count, size_t page_count)
   }
   for (size_t page = 0; page < page_count; ++page) {
     ghost_[page] = 0;
+    promote_[page] = false;
     adapted_[page] = false;
     ghost_prev_[page] = kNoGhost;
     ghost_next_[page] = kNoGhost;
@@ -170,8 +172,9 @@ void ArcReplacer::OnHit(size_t frame, PageId, AccessMode mode) {
 // adapted_ 保证每出一条幽灵只调整一次。
 void ArcReplacer::OnMiss(PageId page) {
   const uint8_t which = page < ghost_.size() ? ghost_[page] : 0;
-  // 每次缺页都重新记录，异常路径残留的判定不会被下一次误用。
-  pending_page_ = which == 0 ? kNoGhost : page;
+  // 层位判定与调 p 在同一步、按页记录（§7.3）：单槽会被并发缺页覆盖，
+  // 预取批的多个判定也只活下来最后一个。
+  if (page < promote_.size()) promote_[page] = which != 0;
   if (which == 0 || adapted_[page]) return;
   adapted_[page] = true;
 
@@ -189,8 +192,8 @@ void ArcReplacer::OnLoad(size_t frame, PageId page, AccessMode mode) {
   // p 已经在 OnMiss 里调过，这里只负责把页从幽灵链摘下、定层。层位用
   // OnMiss 记下的判定：本轮 PushGhost 的容量清理可能已经摘掉了这条幽灵，
   // 再查 ghost_ 会把幽灵命中误判成首次装入。
-  const bool ghost_hit = page == pending_page_;
-  pending_page_ = kNoGhost;
+  const bool ghost_hit = page < promote_.size() && promote_[page];
+  if (page < promote_.size()) promote_[page] = false;
   if (page < ghost_.size() && ghost_[page] != 0) RemoveGhost(page);
 
   Remove(tier_[frame], frame);

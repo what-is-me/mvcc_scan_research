@@ -281,6 +281,27 @@ TEST(ClockReplacer, HasEvictableSkipsPinnedAndEvictingFrames) {
   EXPECT_FALSE(clock.HasEvictable(frames));
 }
 
+// 两次幽灵命中接连发生，中间隔着锁外 I/O：按页记录的判定互不覆盖。
+// 单个待定槽会被后者覆盖前者，两页都退回 T1、自适应失效。
+TEST(ArcReplacer, GhostHitsSurviveInterleavedMisses) {
+  std::vector<Frame> frames = ResidentFrames(2);
+  ArcReplacer arc(2, 8);
+
+  // 撑出 B1 = [P1, P0]，两页各占一个帧，便于分别装回。
+  arc.OnLoad(0, PageId{0}, AccessMode::kNormal);
+  arc.OnEvict(0, PageId{0});
+  arc.OnLoad(1, PageId{1}, AccessMode::kNormal);
+  arc.OnEvict(1, PageId{1});
+
+  arc.OnMiss(PageId{0});  // B1 命中，层位记为 T2
+  arc.OnMiss(PageId{1});  // 另一次缺页，不得覆盖上一次的判定
+  arc.OnLoad(0, PageId{0}, AccessMode::kNormal);
+  arc.OnLoad(1, PageId{1}, AccessMode::kNormal);
+
+  EXPECT_EQ(arc.t2_size(), 2u);
+  EXPECT_EQ(arc.t1_size(), 0u);
+}
+
 // 幽灵命中后要装入的页往往正是最老的幽灵，本轮 PushGhost 的容量清理会把
 // 它摘掉；OnLoad 再查 ghost_ 就会当成首次装入、退回 T1。层位必须用 OnMiss
 // 那一刻的判定。

@@ -62,5 +62,20 @@ TEST(LatencyHistogram, HandlesSubMicrosecondAndHugeValues) {
   EXPECT_GT(histogram.PercentileMs(0.99), 1000.0);
 }
 
+// 2~7 µs 的指数不足 kSubBits，分数位要左移补齐：右移负数在 x86 上被掩码，
+// 这些值会全部塌进倍程的第一个桶，分位数失真超过一个桶宽。
+TEST(LatencyHistogram, SmallValuesLandInTheirOwnSubBuckets) {
+  LatencyHistogram three_us;
+  for (int index = 0; index < 10; ++index) three_us.AddMicros(3);
+  // 3 µs 落在 [3.0, 3.25) µs；塌进 [2, 2.25) 会低于 3 µs 下界。
+  EXPECT_GE(three_us.PercentileMs(0.5), 0.003);
+  EXPECT_LT(three_us.PercentileMs(0.5), 0.0033);
+
+  LatencyHistogram six_us;
+  for (int index = 0; index < 10; ++index) six_us.AddMicros(6);
+  EXPECT_GE(six_us.PercentileMs(0.5), 0.006);
+  EXPECT_LT(six_us.PercentileMs(0.5), 0.007);
+}
+
 }  // namespace
 }  // namespace mvcc

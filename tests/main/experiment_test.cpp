@@ -173,6 +173,38 @@ TEST(Experiment, TinyRunProducesConsistentSummaryAndJson) {
   fs::remove_all(dir);
 }
 
+// §11：间隔是相邻两次扫描起始时刻之差，不是"结束后再等"。断言用本次扫描
+// 自己的耗时自校准：新语义下起始间隔 = max(扫描耗时, 间隔)，恒小于
+// "扫描耗时 + 间隔"；旧实现（从扫描结束起算）恰好等于后者，5 ms 余量把它
+// 与睡眠切片的抖动区分开。
+TEST(Experiment, ScanIntervalIsMeasuredBetweenScanStarts) {
+  Config config;
+  config.table_rows = 800000;  // 1563 页：一次扫描明显长于毫秒级，间隔可分辨
+  config.base_pool_mb = 16;
+  config.undo_pool_mb = 8;
+  config.undo_capacity_gb = 1;
+  config.tp_threads = 2;
+  config.key_dist = KeyDist::kUniform;
+  config.scan_interval_ms = 100;
+  config.duration_s = 1;
+  config.results_dir = (std::filesystem::temp_directory_path() / "mvcc_exp_interval").string();
+
+  std::filesystem::remove_all(config.results_dir);
+  const ExperimentSummary summary = RunExperiment(config, "interval");
+
+  ASSERT_GE(summary.details.size(), 2u);
+  for (size_t index = 1; index < summary.details.size(); ++index) {
+    const double delta =
+        summary.details[index].start_time_s - summary.details[index - 1].start_time_s;
+    const double previous_ms = summary.details[index - 1].main_scan_ms +
+                               summary.details[index - 1].resolve_ms;
+    EXPECT_GT(delta, 0.0);
+    EXPECT_LT(delta, previous_ms / 1000.0 + config.scan_interval_ms / 1000.0 - 0.005)
+        << "scan " << index << ": delta=" << delta << " previous_ms=" << previous_ms;
+  }
+  std::filesystem::remove_all(config.results_dir);
+}
+
 TEST(Experiment, RejectsInvalidConfigBeforeBuildingAnything) {
   Config config = TinyConfig(".");
   config.rows_per_txn = 1'000'000;  // 远超基表池帧数（16），启动即拒

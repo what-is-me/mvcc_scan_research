@@ -128,6 +128,11 @@ ExperimentSummary RunExperimentWith(const Config& config, const std::string& exp
     std::thread ap([&] {
       uint64_t seq = 0;
       for (;;) {
+        // §11：间隔是相邻两次扫描起始时刻之差。基准取本次扫描的开始时刻，
+        // 不能取扫描结束后的 now()——那会把扫描耗时叠进间隔，defer 的解析段
+        // 越长扫描频率越低，负载强度随策略漂移，对照实验就废了。扫描比间隔
+        // 还久时下一轮立即开始，起始间隔退化为扫描耗时，这是语义的自然结果。
+        const auto scan_started = std::chrono::steady_clock::now();
         const double start_s = SecondsSince(started);
         const Timestamp read_ts = env.timestamps.ReadTimestamp();
         const ScanResult result = env.scanner.Scan(read_ts, config.scan_policy);
@@ -136,9 +141,10 @@ ExperimentSummary RunExperimentWith(const Config& config, const std::string& exp
         undo_misses += result.undo_stats.logical_misses;
 
         if (stop.load(std::memory_order_acquire)) break;
-        const auto deadline =
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(config.scan_interval_ms);
-        while (!stop.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+        const auto next_scan_at =
+            scan_started + std::chrono::milliseconds(config.scan_interval_ms);
+        while (!stop.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < next_scan_at) {
           std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
       }

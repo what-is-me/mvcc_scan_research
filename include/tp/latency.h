@@ -64,8 +64,15 @@ class LatencyHistogram {
     int exponent = 0;
     for (uint64_t value = latency_us; value > 1; value >>= 1) ++exponent;
     if (exponent > kMaxExponent) exponent = kMaxExponent;
-    const int fraction = static_cast<int>((latency_us >> (exponent - kSubBits)) &
-                                          ((1 << kSubBits) - 1));
+    // 分数位是最高位之后的 3 位；指数不足 kSubBits 时后面是隐含的零，左移
+    // 补齐再取低位。右移负数是未定义行为——x86 把移位计数对 64 取模，
+    // 2~7 µs 会塌进错误的桶，分位数直接失真。
+    int fraction;
+    if (exponent >= kSubBits) {
+      fraction = static_cast<int>((latency_us >> (exponent - kSubBits)) & ((1 << kSubBits) - 1));
+    } else {
+      fraction = static_cast<int>((latency_us << (kSubBits - exponent)) & ((1 << kSubBits) - 1));
+    }
     const int index = (exponent << kSubBits) | fraction;
     return index < kBucketCount ? index : kBucketCount - 1;
   }

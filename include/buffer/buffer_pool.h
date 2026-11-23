@@ -133,8 +133,11 @@ class BufferPool {
     {
       std::unique_lock<std::mutex> lock(mutex_);
       for (size_t offset = 0; offset < count; ++offset) {
-        // 与 Fix 相同：先让策略自适应，再决定淘汰谁。预取页也计入逻辑请求，
-        // 所以它们同样要参与自适应，否则同一页经预取到达时 p 不会动。
+        // 已驻留或在途的页不是缺页：不参与自适应（§7.3 的 OnMiss 只认缺页
+        // 请求），也不重复占位装载。ReserveFrame 对它们同样返回空，提前跳过
+        // 只是把约定显式化——否则 ARC 会把一次幽灵命中记在永远不会 OnLoad
+        // 的页上。
+        if (table_.Find(first + offset)) continue;
         replacer_.OnMiss(first + offset);
         if (const std::optional<size_t> index = ReserveFrame(first + offset, lock, sink)) {
           reserved_scratch_[reserved_count++] = *index;
