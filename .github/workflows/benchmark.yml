@@ -1,14 +1,12 @@
-# benchmark 手动触发：先跑单测守门，再按输入跑完整 4×5 矩阵，
-# 汇总脚本生成 Markdown 报告（Job Summary + artifact）。
+# benchmark 手动触发：先跑单测守门，再按输入跑完整 5×4 矩阵（含
+# hotfirst_bypass），汇总脚本生成 Markdown 报告（Job Summary + artifact）。
 #
 # runner 磁盘与 CPU 与本地不同：绝对数字以本地为准，CI 产出的价值是
-# 同一环境内 20 组配置的横向对比与跨次回归监测。
+# 同一环境内配置组的横向对比与跨次回归监测。
 #
-# 仅有 workflow_dispatch 触发器且从未运行过的 workflow，GitHub 不注册：
-# Actions 列表、API、workflow 直连 URL、dispatch POST 全部 404，鸡生蛋——
-# 不跑一次就永远无法手动触发。下方的 push 触发器把注册点火做实：本文件
-# 自身变更时自动跑一轮（dispatch inputs 在 push 事件下为空，运行时
-# 表达式有默认值兜底），之后 dispatch 通道全部可用。
+# 触发只有 workflow_dispatch。曾经需要 push 触发器做"注册点火"（仅有
+# dispatch 且从未运行过的 workflow，GitHub 不注册，dispatch POST 404）；
+# 该 workflow 已运行过多次、通道可用，点火触发器按用户要求移除。
 name: benchmark
 
 on:
@@ -29,9 +27,6 @@ on:
       undo_pool_mb:
         description: undo 缓冲池大小（MB）；支持逗号列表，如 16,32；档位越小压力越大
         default: '64'
-  push:
-    paths:
-      - '.github/workflows/benchmark.yml'
 
 permissions:
   contents: read
@@ -54,7 +49,7 @@ jobs:
         run: ctest --output-on-failure
 
   benchmark:
-    name: full matrix (4 scan policies x 4 replacers x pool tiers)
+    name: full matrix (5 scan policies x 4 replacers x pool tiers)
     needs: gate
     runs-on: ubuntu-latest
     timeout-minutes: 90
