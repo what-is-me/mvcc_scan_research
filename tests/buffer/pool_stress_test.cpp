@@ -13,7 +13,6 @@
 #include "buffer/clock_replacer.h"
 #include "buffer/lru_k_replacer.h"
 #include "buffer/lru_replacer.h"
-#include "buffer/mru_replacer.h"
 #include "buffer/page_table.h"
 #include "memory_page_file.h"
 #include "storage/page.h"
@@ -43,11 +42,6 @@ struct ReplacerFactory<LruReplacer> {
 template <>
 struct ReplacerFactory<ClockReplacer> {
   static ClockReplacer Make(size_t frames, size_t) { return ClockReplacer(frames); }
-};
-
-template <>
-struct ReplacerFactory<MruReplacer> {
-  static MruReplacer Make(size_t frames, size_t) { return MruReplacer(frames); }
 };
 
 template <>
@@ -138,7 +132,7 @@ class PoolStress : public ::testing::Test {
 };
 
 using ReplacerTypes =
-    ::testing::Types<LruReplacer, ClockReplacer, MruReplacer, LruKReplacer, ArcReplacer>;
+    ::testing::Types<LruReplacer, ClockReplacer, LruKReplacer, ArcReplacer>;
 
 TYPED_TEST_SUITE(PoolStress, ReplacerTypes);
 

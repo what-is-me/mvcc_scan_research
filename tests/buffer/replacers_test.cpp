@@ -6,7 +6,6 @@
 #include "buffer/arc_replacer.h"
 #include "buffer/clock_replacer.h"
 #include "buffer/lru_k_replacer.h"
-#include "buffer/mru_replacer.h"
 #include "buffer/pool_concepts.h"
 
 namespace mvcc {
@@ -24,7 +23,6 @@ std::vector<Frame> ResidentFrames(size_t count) {
 
 static_assert(FrameReplacer<ArcReplacer>);
 static_assert(FrameReplacer<ClockReplacer>);
-static_assert(FrameReplacer<MruReplacer>);
 static_assert(FrameReplacer<LruKReplacer>);
 
 TEST(ClockReplacer, EvictsScanLoadedPageBeforeResidentOnes) {
@@ -59,41 +57,6 @@ TEST(ClockReplacer, SkipsPinnedFrames) {
 
   EXPECT_FALSE(clock.SelectVictim(PageId{0}, frames).has_value());
   EXPECT_EQ(clock.SelectVictim(PageId{0}, frames).value_or(kNoFrame), 1u);
-}
-
-TEST(MruReplacer, EvictsMostRecentlyLoaded) {
-  std::vector<Frame> frames = ResidentFrames(3);
-  MruReplacer mru(3);
-
-  mru.OnLoad(0, PageId{0}, AccessMode::kNormal);
-  mru.OnLoad(1, PageId{1}, AccessMode::kNormal);
-  mru.OnLoad(2, PageId{2}, AccessMode::kNormal);
-
-  EXPECT_EQ(mru.SelectVictim(PageId{0}, frames).value_or(kNoFrame), 2u);
-}
-
-TEST(MruReplacer, HitMovesFrameToFront) {
-  std::vector<Frame> frames = ResidentFrames(3);
-  MruReplacer mru(3);
-
-  mru.OnLoad(0, PageId{0}, AccessMode::kNormal);
-  mru.OnLoad(1, PageId{1}, AccessMode::kNormal);
-  mru.OnLoad(2, PageId{2}, AccessMode::kNormal);
-
-  mru.OnHit(0, PageId{0}, AccessMode::kNormal);
-  EXPECT_EQ(mru.SelectVictim(PageId{0}, frames).value_or(kNoFrame), 0u);
-}
-
-TEST(MruReplacer, SkipsPinnedFrames) {
-  std::vector<Frame> frames = ResidentFrames(3);
-  MruReplacer mru(3);
-
-  mru.OnLoad(0, PageId{0}, AccessMode::kNormal);
-  mru.OnLoad(1, PageId{1}, AccessMode::kNormal);
-  mru.OnLoad(2, PageId{2}, AccessMode::kNormal);
-  frames[2].pin.store(1);
-
-  EXPECT_EQ(mru.SelectVictim(PageId{0}, frames).value_or(kNoFrame), 1u);
 }
 
 TEST(LruKReplacer, EvictsNeverRevisitedFirst) {

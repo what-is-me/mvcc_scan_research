@@ -176,7 +176,7 @@ static 可变状态。组件间除稳定关系（如 Scanner 持有 Table 引用
 - 扫描访问模式是否启用为配置项，作为对照实验维度。扫描器构造时接收这个
   模式，预取与页读取都用它，不能写死。undo 链的读始终按普通访问：undo 池
   没有"普通访问"这回事，链遍历就是它的正常访问，整片扫成扫描模式会让它的
-  LRU 失去意义。MRU 策略下"新装入优先淘汰"天然成立。
+  LRU 失去意义。
 - **扫描不得绕过 buffer pool 直读文件**：dirty 页的新数据只存在于池内，
   绕过会静默读到旧版本。这条禁令对 hotfirst 的冷段同样成立：冷段 = 快照
   时刻的非驻留集合，但热段扫描期间 TP 可以装载并更新冷段页（更新必须先经
@@ -189,7 +189,11 @@ static 可变状态。组件间除稳定关系（如 Scanner 持有 Table 引用
 
 ### 7.3 替换策略
 
-实现五种：**LRU、Clock、MRU、ARC、LRU-K**。以 concept 约束统一契约：
+实现四种：**LRU、Clock、ARC、LRU-K**。曾含 MRU，CI 三轮实测后移除：本
+课题负载（全表扫描 + zipf 持续更新）下 MRU 无法驻留 TP 热点页，TP 吞吐
+垫底 19~30%，其扫描加速是 TP 缺页让出磁盘带宽的副产品，不提供独立对照
+信息；"新装入优先淘汰"的对照语义由扫描访问模式本身承载。以 concept 约束
+统一契约：
 从可淘汰帧中选出牺牲帧；帧被固定/解固时得到通知；记录一次普通访问；
 接收扫描模式挂钩。策略间不共享状态。
 
@@ -223,7 +227,7 @@ B2 命中 `p -= max(1, |B1|/|B2|)`（比例在摘除幽灵之前取，否则分�
 
 扫描访问的语义对五种策略一致：不推进新近性（已驻留页不因扫描降级），
 因扫描新装入的页优先淘汰。ARC 的 T1 头恰好是最近装入的位置，靠位置做
-不到这件事，所以 ARC 用显式的冷标记、Clock 置冷、MRU 天然落在表头。
+不到这件事，所以 ARC 用显式的冷标记、Clock 置冷。
 LRU-K 不需要额外标记："访问不足 K 次"的组员资格本身就是冷态——扫描
 装入页没有访问记录，落在组内最前；普通命中开始积累访问记录，攒够 K 次
 转入老组、按第 K 次访问时间排序。扫描命中不推进任何记录，否则一次扫描
@@ -516,7 +520,9 @@ read_ts 的历史节点永远不会被触碰。扫描对某行实际遍历的跳
 | 扫描策略 | baseline | baseline / hotfirst / defer_chain / defer_paged |
 | 扫描触发间隔 | 1000 ms | 200 / 1000 / 2000 ms |
 | 扫描访问模式 | 扫描访问（不污染缓存） | 普通访问 / 扫描访问 |
-| 替换策略 | lru | lru / clock / mru / arc / lru_k |
+| 替换策略 | lru | lru / clock / arc / lru_k |
+| 基表池大小 | 128 MB | 32 / 64 / 128 / 256 MB（--base-pool-mb 列表） |
+| undo 池大小 | 64 MB | 16 / 32 / 64 MB（--undo-pool-mb 列表） |
 | 实验时长 | 60 s | 10 / 60 / 300 s |
 | 结果输出目录 | ./results/ | — |
 
@@ -592,7 +598,8 @@ undo 文件容量上限 ≥ 估算值；每事务行数 ≤ 基表池帧数—�
 
 ### 指标（benchmark 层）
 
-实验矩阵 = 扫描策略 4 配置 × 替换策略 5 种。每次实验采集：
+实验矩阵 = 扫描策略 4 配置 × 替换策略 4 种；池大小档位是矩阵的扩展维度，
+由命令行列出、按笛卡尔积扩展（§12 入口）。每次实验采集：
 
 - 扫描端到端延迟（分主扫描与版本解析两段计时）；
 - 基表池 / undo 池各自的逻辑读、物理读、读调用次数、命中率；
@@ -624,11 +631,16 @@ undo 文件容量上限 ≥ 估算值；每事务行数 ≤ 基表池帧数—�
 
 - 入口 `mvcc_exp [config文件] [key=value ...] [--experiment-id=ID]`。配置文件
   默认 `config/default.cfg`，命令行逐项覆盖，解析与校验复用 Config。
-- `--matrix` 使入口串行跑完整个矩阵（扫描策略 4 × 替换策略 5，按枚举声明
+- `--matrix` 使入口串行跑完整个矩阵（扫描策略 4 × 替换策略 4，按枚举声明
   顺序），每轮 experiment_id = 前缀_策略名_替换器名，独立写出 exp_<id>.json；
   `--experiment-id` 给定的是前缀，默认仍取启动时刻。某轮失败即终止矩阵：
   已完成各轮的 JSON 已经落盘。矩阵只负责产出这批 JSON，跨实验的横向汇总
   仍用脚本生成。
+- 池大小档位是矩阵的扩展维度：`--base-pool-mb` / `--undo-pool-mb` 接受
+  逗号分隔列表（如 `32,64,128,256`），矩阵对全部档位组合按笛卡尔积各跑
+  一遍；缺省为单档（取配置值）。多档时每轮 id 前缀追加 `_bp<值>_up<值>`
+  （如 `ci_7_bp32_up64_baseline_lru`），单档不加，保持既有 id 形状。全部
+  组合先逐个校验再开跑，任一档非法即整批拒绝、不落任何盘。
 - `experiment_id` 默认取启动时刻（`YYYYMMDD_HHMMSS`），可用命令行指定以便
   重跑同一编号；结果文件为 `results_dir/exp_<id>.json`，表文件在实验结束后
   删除——每轮实验都重建（§6），JSON 是唯一交付物。
@@ -655,7 +667,7 @@ undo 文件容量上限 ≥ 估算值；每事务行数 ≤ 基表池帧数—�
   undo_file_mb_end, chain_avg_hops
 
 枚举值：scan_policy ∈ {baseline, hotfirst, defer_chain, defer_paged}；
-  replacer ∈ {lru, clock, mru, arc, lru_k}；
+  replacer ∈ {lru, clock, arc, lru_k}；
   key_dist ∈ {uniform, zipf0.5, zipf0.8, zipf1.1}；
   key_mapping ∈ {scattered, head}；
   scan_access_mode ∈ {scan, normal}
@@ -706,13 +718,13 @@ Windows 只作本地开发，CI 全部在 Linux 上跑（§6 的 POSIX O_DIRECT 
   放大 8 倍（kTsanTimeScale；CMake 把 sanitizer 种类暴露成
   MVCC_SANITIZER_* 宏）。undo_capacity_gb 按满速估算给足即可——PagedFile
   按需增长、capacity 只是防打穿的校验数字，调大不占磁盘。矩阵用例断言
-  只有 ≥1 轮，duration 保持下限，避免 20 轮把套件时长拖爆。
+  只有 ≥1 轮，duration 保持下限，避免 16 轮把套件时长拖爆。
 - **benchmark 手动触发**（workflow_dispatch）：先跑单测守门，再按输入的
-  时长/行数/undo 容量跑完整 4 × 5 矩阵（`--matrix`，§12），汇总脚本
-  `scripts/summarize.py` 把这批 JSON 生成 Markdown 对照报告，写入
-  Job Summary 并随 artifact 上传。报告的绝对数字以本地为准——shared
-  runner 的 CPU 与磁盘有波动；同一环境内 20 组配置的横向对比与跨次
-  回归监测是它可靠的价值。
+  时长/行数/undo 容量/池档位跑完整矩阵（`--matrix`，§12；池输入支持逗号
+  列表做档位扩展），汇总脚本 `scripts/summarize.py` 把这批 JSON 生成
+  Markdown 对照报告，写入 Job Summary 并随 artifact 上传。报告的绝对
+  数字以本地为准——shared runner 的 CPU 与磁盘有波动；同一环境内各组
+  配置的横向对比与跨次回归监测是它可靠的价值。
 - 汇总脚本不属系统功能（§12 输出格式一节），只依赖 Python 标准库，
   从 JSON 内容分组，不解析文件名。
 

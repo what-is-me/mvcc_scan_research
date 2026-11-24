@@ -82,7 +82,6 @@ constexpr EnumEntry<ScanPolicy> kScanPolicyEntries[] = {
 constexpr EnumEntry<Replacer> kReplacerEntries[] = {
     {"lru", Replacer::kLru},
     {"clock", Replacer::kClock},
-    {"mru", Replacer::kMru},
     {"arc", Replacer::kArc},
     {"lru_k", Replacer::kLruK},
 };
@@ -181,7 +180,7 @@ bool Config::Set(std::string_view key, std::string_view value, std::string* erro
   }
   if (key == "replacer") {
     if (!ParseEnum(kReplacerEntries, value, &replacer)) {
-      return invalid("lru | clock | mru | arc | lru_k");
+      return invalid("lru | clock | arc | lru_k");
     }
     return true;
   }

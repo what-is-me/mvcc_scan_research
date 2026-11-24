@@ -16,7 +16,6 @@
 #include "buffer/clock_replacer.h"
 #include "buffer/lru_k_replacer.h"
 #include "buffer/lru_replacer.h"
-#include "buffer/mru_replacer.h"
 #include "main/env.h"
 #include "storage/table_builder.h"
 #include "tp/key_mapper.h"
@@ -228,8 +227,6 @@ ExperimentSummary RunExperiment(const Config& config, const std::string& experim
       return RunExperimentWith<LruReplacer>(config, experiment_id);
     case Replacer::kClock:
       return RunExperimentWith<ClockReplacer>(config, experiment_id);
-    case Replacer::kMru:
-      return RunExperimentWith<MruReplacer>(config, experiment_id);
     case Replacer::kArc:
       return RunExperimentWith<ArcReplacer>(config, experiment_id);
     case Replacer::kLruK:
@@ -243,7 +240,7 @@ ExperimentSummary RunExperiment(const Config& config, const std::string& experim
 constexpr ScanPolicy kMatrixScanPolicies[] = {
     ScanPolicy::kBaseline, ScanPolicy::kHotFirst, ScanPolicy::kDeferChain, ScanPolicy::kDeferPaged};
 constexpr Replacer kMatrixReplacers[] = {
-    Replacer::kLru, Replacer::kClock, Replacer::kMru, Replacer::kArc, Replacer::kLruK};
+    Replacer::kLru, Replacer::kClock, Replacer::kArc, Replacer::kLruK};
 
 std::vector<ExperimentSummary> RunMatrix(const Config& base_config,
                                          const std::string& experiment_prefix) {

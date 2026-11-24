@@ -288,7 +288,6 @@ TEST(Config, EnumNamesMatchExperimentOutput) {
   EXPECT_STREQ(ToString(ScanPolicy::kDeferPaged), "defer_paged");
   EXPECT_STREQ(ToString(Replacer::kLru), "lru");
   EXPECT_STREQ(ToString(Replacer::kClock), "clock");
-  EXPECT_STREQ(ToString(Replacer::kMru), "mru");
   EXPECT_STREQ(ToString(Replacer::kArc), "arc");
   EXPECT_STREQ(ToString(Replacer::kLruK), "lru_k");
 }

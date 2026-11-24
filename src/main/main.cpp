@@ -28,10 +28,37 @@ std::string DefaultExperimentId() {
   return buffer;
 }
 
+// 解析逗号分隔的正整数列表（池档位），如 "32,64,128"。空串视作未提供，
+// 返回 false；任何一段为空、非数字或为零都拒绝——档位错误要启动即报，
+// 不能留一半解析结果继续跑。
+bool ParseTiers(const std::string& text, std::vector<size_t>* out) {
+  if (text.empty()) return false;
+  size_t start = 0;
+  while (true) {
+    const size_t comma = text.find(',', start);
+    const std::string token =
+        text.substr(start, comma == std::string::npos ? comma : comma - start);
+    size_t value = 0;
+    try {
+      value = static_cast<size_t>(std::stoull(token));
+    } catch (...) {
+      return false;
+    }
+    if (token.empty() || value == 0) return false;
+    out->push_back(value);
+    if (comma == std::string::npos) break;
+    start = comma + 1;
+  }
+  return true;
+}
+
 void PrintUsage() {
   std::cerr << "用法: mvcc_exp [--matrix] [config文件] [key=value ...] [--experiment-id=ID]\n"
             << "  config文件默认为 config/default.cfg；key=value 覆盖其中一项。\n"
-            << "  --matrix 按 4×5 矩阵逐轮跑完，--experiment-id 作为各轮 id 的前缀。\n"
+            << "  --matrix 按 4×4 矩阵逐轮跑完，--experiment-id 作为各轮 id 的前缀。\n"
+            << "  --base-pool-mb=32,64,128  基表池档位列表（逗号分隔），矩阵按档位\n"
+            << "                            笛卡尔积扩展，id 前缀追加 _bp<值>_up<值>。\n"
+            << "  --undo-pool-mb=16,32,64   undo 池档位列表，语义同上。\n"
             << "  结果写入 results_dir 下的 exp_<id>.json。\n";
 }
 
@@ -46,6 +73,8 @@ int main(int argc, char** argv) {
   std::string experiment_id;
   bool explicit_id = false;
   bool matrix = false;
+  std::vector<size_t> base_pool_tiers;
+  std::vector<size_t> undo_pool_tiers;
   std::vector<std::pair<std::string, std::string>> overrides;
 
   for (int index = 1; index < argc; ++index) {
@@ -57,6 +86,22 @@ int main(int argc, char** argv) {
     }
     if (arg == "--matrix") {
       matrix = true;
+      continue;
+    }
+    if (arg.rfind("--base-pool-mb=", 0) == 0) {
+      if (!ParseTiers(arg.substr(sizeof("--base-pool-mb=") - 1), &base_pool_tiers)) {
+        std::cerr << "非法的池档位列表: " << arg << "\n";
+        PrintUsage();
+        return 1;
+      }
+      continue;
+    }
+    if (arg.rfind("--undo-pool-mb=", 0) == 0) {
+      if (!ParseTiers(arg.substr(sizeof("--undo-pool-mb=") - 1), &undo_pool_tiers)) {
+        std::cerr << "非法的池档位列表: " << arg << "\n";
+        PrintUsage();
+        return 1;
+      }
       continue;
     }
     if (arg.rfind("--", 0) == 0) {
@@ -89,6 +134,19 @@ int main(int argc, char** argv) {
     std::cerr << "配置非法: " << problem << "\n";
     return 1;
   }
+  if (!matrix && (base_pool_tiers.size() > 1 || undo_pool_tiers.size() > 1)) {
+    std::cerr << "池档位列表仅在 --matrix 模式下支持\n";
+    PrintUsage();
+    return 1;
+  }
+  if (!matrix) {
+    if (!base_pool_tiers.empty()) config.base_pool_mb = base_pool_tiers.front();
+    if (!undo_pool_tiers.empty()) config.undo_pool_mb = undo_pool_tiers.front();
+    if (const std::string problem = config.Validate(); !problem.empty()) {
+      std::cerr << "配置非法: " << problem << "\n";
+      return 1;
+    }
+  }
   for (const std::string& warning : config.Warnings()) {
     std::cerr << "警告: " << warning << "\n";
   }
@@ -100,10 +158,44 @@ int main(int argc, char** argv) {
   try {
     if (matrix) {
       // 矩阵模式：RunMatrix 逐轮写出 exp_<id>.json，失败即终止（已完成各轮
-      // 已落盘）。experiment_id 在此处作为前缀使用。
-      const std::vector<ExperimentSummary> summaries = RunMatrix(config, experiment_id);
-      std::cout << "矩阵完成: " << summaries.size() << " 轮，结果目录 " << config.results_dir
-                << "\n";
+      // 已落盘）。experiment_id 在此处作为前缀使用；池档位列表对全部组合
+      // 按笛卡尔积各跑一遍，多档时前缀追加 _bp<值>_up<值>。
+      const std::vector<size_t> base_tiers = base_pool_tiers.empty()
+                                                 ? std::vector<size_t>{config.base_pool_mb}
+                                                 : base_pool_tiers;
+      const std::vector<size_t> undo_tiers = undo_pool_tiers.empty()
+                                                 ? std::vector<size_t>{config.undo_pool_mb}
+                                                 : undo_pool_tiers;
+      // 全组合先逐个校验再开跑：任一档非法即整批拒绝，不落任何盘。
+      for (const size_t base : base_tiers) {
+        for (const size_t undo : undo_tiers) {
+          Config tier = config;
+          tier.base_pool_mb = base;
+          tier.undo_pool_mb = undo;
+          if (const std::string problem = tier.Validate(); !problem.empty()) {
+            std::cerr << "配置非法 (base_pool_mb=" << base << ", undo_pool_mb="
+                      << undo << "): " << problem << "\n";
+            return 1;
+          }
+        }
+      }
+      size_t total = 0;
+      for (const size_t base : base_tiers) {
+        for (const size_t undo : undo_tiers) {
+          Config tier = config;
+          tier.base_pool_mb = base;
+          tier.undo_pool_mb = undo;
+          std::string prefix = experiment_id;
+          if (base_tiers.size() > 1 || undo_tiers.size() > 1) {
+            prefix += "_bp" + std::to_string(base) + "_up" + std::to_string(undo);
+          }
+          const std::vector<ExperimentSummary> summaries = RunMatrix(tier, prefix);
+          total += summaries.size();
+          std::cout << "矩阵完成: bp" << base << "/up" << undo << "，共 "
+                    << summaries.size() << " 轮\n";
+        }
+      }
+      std::cout << "全部完成: " << total << " 轮，结果目录 " << config.results_dir << "\n";
     } else {
       const ExperimentSummary summary = RunExperiment(config, experiment_id);
       const std::filesystem::path output =

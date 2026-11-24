@@ -15,7 +15,7 @@ import json
 import sys
 from pathlib import Path
 
-REPLACER_ORDER = ["lru", "clock", "mru", "arc", "lru_k"]
+REPLACER_ORDER = ["lru", "clock", "arc", "lru_k"]
 POLICY_ORDER = ["baseline", "hotfirst", "defer_chain", "defer_paged"]
 
 # 表格列：JSON 键名 -> 表头（单位已编码进键名）。
@@ -55,19 +55,40 @@ def Format(value):
 
 
 def GroupByPolicy(summaries):
+    """按扫描策略分组；存在多个池档位时，档位并入组键并标注在标题里。"""
+    tiers = sorted({(s.get("base_pool_mb"), s.get("undo_pool_mb")) for s in summaries})
+    multi_tier = len(tiers) > 1
+
     groups = {}
     for summary in summaries:
         policy = summary["scan_policy"]
-        groups.setdefault(policy, []).append(summary)
-    for policy in groups:
-        groups[policy].sort(
-            key=lambda s: REPLACER_ORDER.index(s["replacer"])
-            if s["replacer"] in REPLACER_ORDER
+        if multi_tier:
+            key = (policy, summary.get("base_pool_mb"), summary.get("undo_pool_mb"))
+        else:
+            key = (policy,)
+        groups.setdefault(key, []).append(summary)
+
+    def group_rank(key):
+        policy_rank = (
+            POLICY_ORDER.index(key[0]) if key[0] in POLICY_ORDER else len(POLICY_ORDER)
+        )
+        return (policy_rank,) + key[1:]
+
+    def row_rank(summary):
+        replacer = summary["replacer"]
+        return (
+            REPLACER_ORDER.index(replacer)
+            if replacer in REPLACER_ORDER
             else len(REPLACER_ORDER)
         )
-    ordered = [p for p in POLICY_ORDER if p in groups]
-    ordered += sorted(p for p in groups if p not in POLICY_ORDER)
-    return [(policy, groups[policy]) for policy in ordered]
+
+    result = []
+    for key in sorted(groups, key=group_rank):
+        label = key[0]
+        if multi_tier:
+            label += f" @ bp{key[1]}/up{key[2]}"
+        result.append((label, sorted(groups[key], key=row_rank)))
+    return result
 
 
 def Table(rows):

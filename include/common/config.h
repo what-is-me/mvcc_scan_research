@@ -13,7 +13,7 @@ enum class KeyDist { kUniform, kZipf05, kZipf08, kZipf11 };
 enum class KeyMapping { kScattered, kHead };
 enum class ScanAccessMode { kScan, kNormal };
 enum class ScanPolicy { kBaseline, kHotFirst, kDeferChain, kDeferPaged };
-enum class Replacer { kLru, kClock, kMru, kArc, kLruK };
+enum class Replacer { kLru, kClock, kArc, kLruK };
 
 const char* ToString(KeyDist value);
 const char* ToString(KeyMapping value);

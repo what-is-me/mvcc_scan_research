@@ -24,10 +24,10 @@ on:
         description: undo 文件容量（GB）；时长超过约 130 s 时必须加大
         default: '16'
       base_pool_mb:
-        description: 基表缓冲池大小（MB）；§11 池压力维度 32/64/128/256
+        description: 基表缓冲池大小（MB）；支持逗号列表做档位矩阵，如 32,64,128,256
         default: '128'
       undo_pool_mb:
-        description: undo 缓冲池大小（MB）；§11 undo 压力维度 16/32/64
+        description: undo 缓冲池大小（MB）；支持逗号列表，如 16,32；档位越小压力越大
         default: '64'
   push:
     paths:
@@ -54,10 +54,10 @@ jobs:
         run: ctest --output-on-failure
 
   benchmark:
-    name: full matrix (4 scan policies x 5 replacers)
+    name: full matrix (4 scan policies x 4 replacers x pool tiers)
     needs: gate
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
@@ -70,12 +70,12 @@ jobs:
         run: |
           ./build/bin/mvcc_exp --matrix \
             --experiment-id=ci_${{ github.run_number }} \
+            --base-pool-mb=${{ inputs.base_pool_mb || '128' }} \
+            --undo-pool-mb=${{ inputs.undo_pool_mb || '64' }} \
             config/default.cfg \
             duration_s=${{ inputs.duration_s || '10' }} \
             table_rows=${{ inputs.table_rows || '2000000' }} \
             undo_capacity_gb=${{ inputs.undo_capacity_gb || '16' }} \
-            base_pool_mb=${{ inputs.base_pool_mb || '128' }} \
-            undo_pool_mb=${{ inputs.undo_pool_mb || '64' }} \
             results_dir=results
       - name: Summarize into job summary
         run: |
