@@ -3,6 +3,12 @@
 #
 # runner 磁盘与 CPU 与本地不同：绝对数字以本地为准，CI 产出的价值是
 # 同一环境内 20 组配置的横向对比与跨次回归监测。
+#
+# 仅有 workflow_dispatch 触发器且从未运行过的 workflow，GitHub 不注册：
+# Actions 列表、API、workflow 直连 URL、dispatch POST 全部 404，鸡生蛋——
+# 不跑一次就永远无法手动触发。下方的 push 触发器把注册点火做实：本文件
+# 自身变更时自动跑一轮（dispatch inputs 在 push 事件下为空，运行时
+# 表达式有默认值兜底），之后 dispatch 通道全部可用。
 name: benchmark
 
 on:
@@ -17,6 +23,9 @@ on:
       undo_capacity_gb:
         description: undo 文件容量（GB）；时长超过约 130 s 时必须加大
         default: '16'
+  push:
+    paths:
+      - '.github/workflows/benchmark.yml'
 
 permissions:
   contents: read
