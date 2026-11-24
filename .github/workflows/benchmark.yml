@@ -26,6 +26,9 @@ on:
       base_pool_mb:
         description: 基表缓冲池大小（MB）；§11 池压力维度 32/64/128/256
         default: '128'
+      undo_pool_mb:
+        description: undo 缓冲池大小（MB）；§11 undo 压力维度 16/32/64
+        default: '64'
   push:
     paths:
       - '.github/workflows/benchmark.yml'
@@ -72,6 +75,7 @@ jobs:
             table_rows=${{ inputs.table_rows || '2000000' }} \
             undo_capacity_gb=${{ inputs.undo_capacity_gb || '16' }} \
             base_pool_mb=${{ inputs.base_pool_mb || '128' }} \
+            undo_pool_mb=${{ inputs.undo_pool_mb || '64' }} \
             results_dir=results
       - name: Summarize into job summary
         run: |
