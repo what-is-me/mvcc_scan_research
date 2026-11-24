@@ -52,6 +52,19 @@ bool ParseTiers(const std::string& text, std::vector<size_t>* out) {
   return true;
 }
 
+// 档位列表的展示形式：未提供时回退到基准配置的单值。"实验配置"行打印的是
+// 档位应用之前的基准 config，档位必须单独回显——否则 CI 日志里看不出
+// 列表被吃进去了，容易误判成参数丢失。
+std::string FormatTiers(const std::vector<size_t>& tiers, size_t fallback) {
+  if (tiers.empty()) return std::to_string(fallback);
+  std::string joined;
+  for (const size_t value : tiers) {
+    if (!joined.empty()) joined += ',';
+    joined += std::to_string(value);
+  }
+  return joined;
+}
+
 void PrintUsage() {
   std::cerr << "用法: mvcc_exp [--matrix] [config文件] [key=value ...] [--experiment-id=ID]\n"
             << "  config文件默认为 config/default.cfg；key=value 覆盖其中一项。\n"
@@ -153,6 +166,13 @@ int main(int argc, char** argv) {
   if (!explicit_id) experiment_id = DefaultExperimentId();
 
   std::cout << "实验配置: " << config.Describe() << "\n";
+  if (!base_pool_tiers.empty() || !undo_pool_tiers.empty()) {
+    const size_t combos = (base_pool_tiers.empty() ? 1 : base_pool_tiers.size()) *
+                          (undo_pool_tiers.empty() ? 1 : undo_pool_tiers.size());
+    std::cout << "池档位: base_pool_mb = " << FormatTiers(base_pool_tiers, config.base_pool_mb)
+              << " | undo_pool_mb = " << FormatTiers(undo_pool_tiers, config.undo_pool_mb)
+              << "（" << combos << " 组档位组合，每组一个 4×4 矩阵）\n";
+  }
   std::cout << "experiment_id = " << experiment_id << "\n";
 
   try {
