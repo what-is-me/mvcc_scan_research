@@ -6,29 +6,6 @@
 
 namespace mvcc {
 
-TEST(DirectPageTable, StartsEmptyAndRoundTrips) {
-  DirectPageTable table(8);
-  EXPECT_FALSE(table.Find(0).has_value());
-
-  table.Insert(0, 3);
-  ASSERT_TRUE(table.Find(0).has_value());
-  EXPECT_EQ(*table.Find(0), 3u);
-
-  table.Erase(0);
-  EXPECT_FALSE(table.Find(0).has_value());
-}
-
-TEST(DirectPageTable, KeepsPagesIndependent) {
-  DirectPageTable table(8);
-  for (size_t page = 0; page < 8; ++page) table.Insert(page, page + 100);
-
-  for (size_t page = 0; page < 8; ++page) EXPECT_EQ(*table.Find(page), page + 100);
-
-  table.Erase(3);
-  EXPECT_FALSE(table.Find(3).has_value());
-  EXPECT_EQ(*table.Find(4), 104u);
-}
-
 TEST(FrameHashTable, FindsEveryInsertedPage) {
   FrameHashTable table(16);
   for (size_t frame = 0; frame < 16; ++frame) table.Insert(frame * 7, frame);

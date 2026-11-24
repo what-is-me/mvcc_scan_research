@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 REPLACER_ORDER = ["lru", "clock", "arc", "lru_k"]
-POLICY_ORDER = ["baseline", "hotfirst", "defer_chain", "defer_paged"]
+POLICY_ORDER = ["baseline", "hotfirst", "hotfirst_bypass", "defer_chain", "defer_paged"]
 
 # 表格列：JSON 键名 -> 表头（单位已编码进键名）。
 COLUMNS = [

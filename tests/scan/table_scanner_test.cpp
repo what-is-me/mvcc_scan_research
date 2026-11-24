@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -28,7 +29,7 @@ constexpr size_t kTableRows = 1024;
 constexpr size_t kUndoPages = 64;
 constexpr size_t kRowsPerTxn = 4;
 
-using BasePool = BufferPool<DirectPageTable, LruReplacer>;
+using BasePool = BufferPool<FrameHashTable, LruReplacer>;
 using UndoPool = BufferPool<FrameHashTable, LruReplacer>;
 using Txn = Transaction<BasePool, UndoPool>;
 
@@ -39,7 +40,7 @@ struct Env {
         base_file(layout.page_count(), layout.page_size(), test::PageFill::kZero),
         undo_file(kUndoPages, layout.page_size(), test::PageFill::kZero),
         base(layout, base_frames, base_file, RowLockMode::kAllocate,
-             DirectPageTable(layout.page_count()), LruReplacer(base_frames), PoolHooks(), prefetch),
+             FrameHashTable(base_frames), LruReplacer(base_frames), PoolHooks(), prefetch),
         undo(layout, undo_frames, undo_file, RowLockMode::kNone, FrameHashTable(undo_frames),
              LruReplacer(undo_frames)),
         appender(allocator, layout),
@@ -280,8 +281,8 @@ void ExpectPoliciesAgreeWithBaseline() {
   EXPECT_EQ(baseline.chain_hops, 5u);
   EXPECT_EQ(baseline.checksum, ExpectedChecksum(env.layout));
 
-  const ScanPolicy others[] = {ScanPolicy::kHotFirst, ScanPolicy::kDeferChain,
-                               ScanPolicy::kDeferPaged};
+  const ScanPolicy others[] = {ScanPolicy::kHotFirst, ScanPolicy::kHotFirstBypass,
+                               ScanPolicy::kDeferChain, ScanPolicy::kDeferPaged};
   for (const ScanPolicy policy : others) {
     const ScanResult result = env.scanner.Scan(read_ts, policy);
     EXPECT_EQ(result.rows, baseline.rows);
@@ -401,6 +402,94 @@ TEST(TableScanner, HotFirstSavesTheReadsBaselinePaysFor) {
 
   EXPECT_EQ(run(ScanPolicy::kHotFirst), 2u);   // 扫 2、3 命中；再读 0、1
   EXPECT_EQ(run(ScanPolicy::kBaseline), 4u);   // 扫 0、1 时把 2、3 挤掉，又读回来
+}
+
+// hotfirst_bypass：冷段查池直读（§7.2 / §10）。热点页 2、3 预先装进池（即
+// 快照里的热点集合），冷段 = {0, 1} 两页均未驻留——直读合并成一次设备读，
+// 且不把冷页装进池（扫描后驻留集合不变）。计数口径：直读页计入逻辑读与
+// 逻辑未命中，物理读按页、读调用按次。
+TEST(TableScanner, HotFirstBypassReadsColdPagesDirectly) {
+  Env env(/*table_rows=*/128, /*base_frames=*/4, /*undo_frames=*/8, /*prefetch=*/4);
+  FillDerivedRows(env);
+  EXPECT_EQ(env.layout.page_count(), 4u);
+
+  env.base.Unpin(env.base.Fix(3, AccessMode::kNormal));
+  env.base.Unpin(env.base.Fix(2, AccessMode::kNormal));
+
+  TableScanner<BasePool, UndoPool> scanner(env.base, env.undo, env.layout);
+  const ScanResult result =
+      scanner.Scan(env.timestamps.ReadTimestamp(), ScanPolicy::kHotFirstBypass);
+
+  EXPECT_EQ(result.rows, env.layout.row_count());
+  EXPECT_EQ(result.checksum, ExpectedChecksum(env.layout));
+
+  // 逻辑读 = 全部 4 页（热点 2 页池命中 + 冷段 2 页直读）；物理读只有冷段，
+  // 且连续子段合并成一次设备读。
+  EXPECT_EQ(result.base_stats.logical_reads, 4u);
+  EXPECT_EQ(result.base_stats.logical_misses, 2u);
+  EXPECT_EQ(result.base_stats.physical_reads, 2u);
+  EXPECT_EQ(result.base_stats.physical_read_ops, 1u);
+  EXPECT_DOUBLE_EQ(result.base_stats.hit_rate(), 0.5);
+
+  // 直读不经池帧：扫描后驻留集合仍是热点 {2, 3}，冷页没有进池。
+  std::vector<PageId> resident;
+  env.base.CollectResidentPages(resident);
+  std::sort(resident.begin(), resident.end());
+  EXPECT_EQ(resident, (std::vector<PageId>{2, 3}));
+}
+
+// O1 端到端：提交过的页被淘汰写回后，直读必须看到已提交的新版本。IN4
+// （写回先于条目清除）是"页不在池 ⇒ 磁盘镜像 = 最新已提交状态"的来源。
+TEST(TableScanner, HotFirstBypassSeesCommittedDataAfterEviction) {
+  Env env(/*table_rows=*/128, /*base_frames=*/2, /*undo_frames=*/8, /*prefetch=*/4);
+  FillDerivedRows(env);
+
+  const RowId row = RowId::Make(0, 5);
+  const size_t linear = row.page() * env.layout.rows_per_page() + row.slot();
+  const std::vector<std::byte> updated(env.layout.data_size(), std::byte{0x66});
+  UpdateRow(env, row, updated, /*commit=*/true);
+  // 快照必须取在提交之后：取号与读快照都用同一个计数器，先取的 read_ts 会
+  // 与首次提交的 commit_ts 相同，按 §8 语义（ts ≥ read_ts 不可见）走链返回
+  // 旧版本——那是另一条用例的职责。
+  const Timestamp after = env.timestamps.ReadTimestamp();
+
+  // 把脏页挤出池：再装 1、2 两页，2 帧的池必然淘汰页 0（LRU 最旧）并写回。
+  env.base.Unpin(env.base.Fix(1, AccessMode::kNormal));
+  env.base.Unpin(env.base.Fix(2, AccessMode::kNormal));
+  ASSERT_GE(env.base.stats().physical_writes, 1u);
+
+  TableScanner<BasePool, UndoPool> scanner(env.base, env.undo, env.layout);
+  const ScanResult result = scanner.Scan(after, ScanPolicy::kHotFirstBypass);
+
+  EXPECT_EQ(result.checksum, ExpectedChecksum(env.layout) ^
+                                 ChecksumBytes(RowData(linear, env.layout.data_size())) ^
+                                 ChecksumBytes(updated));
+}
+
+// 直读页在快照之后又有提交：盘上版本 ts ≥ read_ts，判定失败沿盘上链头走链，
+// 返回快照可见的旧版本。链头与数据同页写回（I5 + IN4），undo 记录由 undo 池
+// 服务——bypass 只作用于基表页，版本解析路径不变。
+TEST(TableScanner, HotFirstBypassWalksTheChainWhenDiskIsNewer) {
+  Env env(/*table_rows=*/128, /*base_frames=*/2, /*undo_frames=*/8, /*prefetch=*/4);
+  FillDerivedRows(env);
+
+  const RowId row = RowId::Make(0, 5);
+  const Timestamp before = env.timestamps.ReadTimestamp();
+  const std::vector<std::byte> updated(env.layout.data_size(), std::byte{0x66});
+  UpdateRow(env, row, updated, /*commit=*/true);
+
+  // 提交后把脏页挤出池：盘上版本已经是新提交（ts ≥ read_ts）。
+  env.base.Unpin(env.base.Fix(1, AccessMode::kNormal));
+  env.base.Unpin(env.base.Fix(2, AccessMode::kNormal));
+  ASSERT_GE(env.base.stats().physical_writes, 1u);
+
+  TableScanner<BasePool, UndoPool> scanner(env.base, env.undo, env.layout);
+  const ScanResult result = scanner.Scan(before, ScanPolicy::kHotFirstBypass);
+
+  // 快照在提交之前：直读拿到的新版本不可见，走链返回旧值。
+  EXPECT_EQ(result.chain_rows, 1u);
+  EXPECT_EQ(result.chain_hops, 1u);
+  EXPECT_EQ(result.checksum, ExpectedChecksum(env.layout));
 }
 
 // I2 的窗口：读者先看到旧链头，写者随后追加记录并把链头换掉。判定失败时

@@ -17,7 +17,8 @@
 namespace mvcc {
 
 // §5 的 Env：一次实验的全部组件按依赖序构造，彼此只持引用。模板参数是
-// 基表池的替换策略——五种策略在编译期实例化，运行期由 RunExperiment 分发；
+// 基表池的替换策略——四种策略在编译期实例化，运行期由 RunExperiment 分发；
+// 两个池的页表都用侵入式链哈希（§7.1：页号无稠密假设，与真实系统一致），
 // undo 池固定 LRU（§7.3：ARC 的幽灵表按页号稠密索引，undo 页号无上界）。
 //
 // 文件由调用方先备好：基表文件已建满，undo 文件为空（只追加）。
@@ -30,7 +31,7 @@ class ExperimentEnv {
         base_file(base_path, layout.page_size()),
         undo_file(undo_path, layout.page_size()),
         base_pool(layout, BaseFrames(config), base_file, RowLockMode::kAllocate,
-                  DirectPageTable(layout.page_count()), std::move(replacer), PoolHooks(),
+                  FrameHashTable(BaseFrames(config)), std::move(replacer), PoolHooks(),
                   kDefaultPrefetchPages),
         undo_pool(layout, UndoFrames(config), undo_file, RowLockMode::kNone,
                   FrameHashTable(UndoFrames(config)), LruReplacer(UndoFrames(config))),
@@ -51,11 +52,11 @@ class ExperimentEnv {
   TableLayout layout;
   PagedFile base_file;
   PagedFile undo_file;
-  BufferPool<DirectPageTable, BaseReplacer> base_pool;
+  BufferPool<FrameHashTable, BaseReplacer> base_pool;
   BufferPool<FrameHashTable, LruReplacer> undo_pool;
   UndoPageAllocator allocator;
   TimestampManager timestamps;
-  TableScanner<BufferPool<DirectPageTable, BaseReplacer>, BufferPool<FrameHashTable, LruReplacer>>
+  TableScanner<BufferPool<FrameHashTable, BaseReplacer>, BufferPool<FrameHashTable, LruReplacer>>
       scanner;
 };
 

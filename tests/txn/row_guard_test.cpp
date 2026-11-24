@@ -21,13 +21,13 @@ constexpr size_t kPageSize = 4096;
 constexpr size_t kRowSize = 128;
 constexpr size_t kTableRows = 1024;
 
-using Pool = BufferPool<DirectPageTable, LruReplacer>;
+using Pool = BufferPool<FrameHashTable, LruReplacer>;
 
 TableLayout TestLayout() { return TableLayout(kPageSize, kRowSize, kTableRows); }
 
 Pool MakePool(const TableLayout& layout, size_t frame_count, PageFile& file) {
   return Pool(layout, frame_count, file, RowLockMode::kAllocate,
-              DirectPageTable(layout.page_count()), LruReplacer(frame_count));
+              FrameHashTable(frame_count), LruReplacer(frame_count));
 }
 
 TEST(RowGuard, HoldsTheRowUntilDestruction) {

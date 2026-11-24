@@ -21,10 +21,10 @@ constexpr size_t kTableRows = 4096;
 constexpr size_t kFrames = 64;
 constexpr size_t kPrefetchPages = 8;
 
-using Pool = BufferPool<DirectPageTable, LruReplacer>;
+using Pool = BufferPool<FrameHashTable, LruReplacer>;
 
 Pool MakePool(const TableLayout& layout, PageFile& file, size_t prefetch_pages) {
-  return Pool(layout, kFrames, file, RowLockMode::kNone, DirectPageTable(layout.page_count()),
+  return Pool(layout, kFrames, file, RowLockMode::kNone, FrameHashTable(kFrames),
               LruReplacer(kFrames), PoolHooks(), prefetch_pages);
 }
 

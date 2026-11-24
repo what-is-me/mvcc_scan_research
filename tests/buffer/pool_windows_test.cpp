@@ -22,13 +22,13 @@ constexpr size_t kPageSize = 4096;
 constexpr size_t kRowSize = 128;
 constexpr size_t kTableRows = 1000;
 
-using Pool = BufferPool<DirectPageTable, LruReplacer>;
+using Pool = BufferPool<FrameHashTable, LruReplacer>;
 
 TableLayout TestLayout() { return TableLayout(kPageSize, kRowSize, kTableRows); }
 
 Pool MakePool(const TableLayout& layout, size_t frame_count, PageFile& file, PoolHooks hooks) {
   return Pool(layout, frame_count, file, RowLockMode::kAllocate,
-              DirectPageTable(layout.page_count()), LruReplacer(frame_count), hooks);
+              FrameHashTable(frame_count), LruReplacer(frame_count), hooks);
 }
 
 // 在指定注入点挡住执行 I/O 的线程，由测试精确决定何时放行。

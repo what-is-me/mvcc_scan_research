@@ -14,6 +14,7 @@
 
 #include "buffer/buffer_pool.h"
 #include "buffer/pin_guard.h"
+#include "common/aligned_buffer.h"
 #include "common/basic_types.h"
 #include "common/config.h"
 #include "storage/page.h"
@@ -132,11 +133,12 @@ inline bool CheckBaseVersion(Row row, Timestamp read_ts, UndoRowId& cursor) {
 
 }  // namespace scan_detail
 
-// 全表扫描。三种策略共用页内逐行的可见性判定，差异只在页面访问组织与版本
+// 全表扫描。四种策略共用页内逐行的可见性判定，差异只在页面访问组织与版本
 // 解析时机（§10）：
-//   baseline  按页号升序扫，需要旧版本就立即沿 undo 链回溯；
-//   hotfirst  先扫扫描开始瞬间驻留的页，再扫其余页，两段都按页号升序；
-//   defer     主扫描只记录链头，解析阶段再访问 undo 页（链式或按页分桶）。
+//   baseline        按页号升序扫，需要旧版本就立即沿 undo 链回溯；
+//   hotfirst        先扫扫描开始瞬间驻留的页，再扫其余页，两段都按页号升序；
+//   hotfirst_bypass 热点段同 hotfirst，冷段查池直读文件（§7.2 O1），不经池帧；
+//   defer           主扫描只记录链头，解析阶段再访问 undo 页（链式或按页分桶）。
 // 页按批预取，一次 Fix 覆盖整页的行——逐行 Fix 会给每行再加一次池锁往返。
 template <typename BasePool, typename UndoPool>
 class TableScanner {
@@ -146,7 +148,13 @@ class TableScanner {
   // 链遍历就是它的正常访问，整片扫成扫描模式会让它的 LRU 失去意义。
   TableScanner(BasePool& base_pool, UndoPool& undo_pool, const TableLayout& layout,
                AccessMode mode = AccessMode::kScan)
-      : base_pool_(&base_pool), undo_pool_(&undo_pool), layout_(&layout), mode_(mode) {}
+      : base_pool_(&base_pool),
+        undo_pool_(&undo_pool),
+        layout_(&layout),
+        mode_(mode),
+        // 冷段直读的私有缓冲：深度与预取一致（容量为 0 时退化为单页直读）。
+        // 扇区对齐由 AlignedBuffer 保证，直读要求三者按扇区对齐（§6）。
+        bypass_buffer_(std::max(base_pool.prefetch_capacity(), size_t{1}) * layout.page_size()) {}
 
   TableScanner(const TableScanner&) = delete;
   TableScanner& operator=(const TableScanner&) = delete;
@@ -157,6 +165,8 @@ class TableScanner {
         return ScanBaseline(read_ts);
       case ScanPolicy::kHotFirst:
         return ScanHotFirst(read_ts);
+      case ScanPolicy::kHotFirstBypass:
+        return ScanHotFirstBypass(read_ts);
       case ScanPolicy::kDeferChain: {
         DeferredScan scan = ScanDeferMain(read_ts);
         ResolveDeferredChain(scan, read_ts);
@@ -179,28 +189,50 @@ class TableScanner {
     return result;
   }
 
-  // 热点集合在扫描开始这一刻固化：对基表页表做一次快照，热点段 = 快照集合，
-  // 冷段 = 全部页号 − 快照集合。不固化的话，扫描自己与 TP 都在持续改变驻留
-  // 状态，冷热划分就退化成随机。快照允许近似——并发淘汰只让某一页从热段掉到
-  // 冷段，扫到时重新装入，正确性不受影响。
-  ScanResult ScanHotFirst(Timestamp read_ts) {
-    const auto started = std::chrono::steady_clock::now();
-    ScanResult result;
-
-    std::vector<PageId> hot;
+  // 热点集合在扫描开始这一刻固化（§10，hotfirst 与 hotfirst_bypass 共用）：
+  // 对基表页表做一次快照，热点段 = 快照集合，冷段 = 全部页号 − 快照集合。
+  // 不固化的话，扫描自己与 TP 都在持续改变驻留状态，冷热划分就退化成随机。
+  // 快照允许近似——并发淘汰只让某一页从热段掉到冷段，扫到时重新装入，
+  // 正确性不受影响。
+  void SnapshotHotPages(std::vector<PageId>& hot) {
     hot.reserve(base_pool_->frame_count());
     base_pool_->CollectResidentPages(hot);
     std::sort(hot.begin(), hot.end());
     // 页表里理论上不会有越界页；真出现了就丢掉，否则冷段归并会卡住，
     // 而 Fix 一个越界页会直接读到文件尾抛异常。
     std::erase_if(hot, [this](PageId page) { return page >= layout_->page_count(); });
+  }
 
+  ScanResult ScanHotFirst(Timestamp read_ts) {
+    const auto started = std::chrono::steady_clock::now();
+    ScanResult result;
+
+    std::vector<PageId> hot;
+    SnapshotHotPages(hot);
     ScanPages(hot, read_ts, result);
 
     std::vector<PageId> cold;
     cold.reserve(layout_->page_count());
     scan_detail::BuildColdPages(hot, layout_->page_count(), cold);
     ScanPages(cold, read_ts, result);
+    result.main_scan_ms = scan_detail::ElapsedMs(started);
+    return result;
+  }
+
+  // hotfirst_bypass（§10）：热点段与 hotfirst 完全相同地走池；冷段查池直读
+  // （§7.2 O1）——不经池帧、不触碰替换策略，也不把冷页装进池挤占常驻页。
+  ScanResult ScanHotFirstBypass(Timestamp read_ts) {
+    const auto started = std::chrono::steady_clock::now();
+    ScanResult result;
+
+    std::vector<PageId> hot;
+    SnapshotHotPages(hot);
+    ScanPages(hot, read_ts, result);
+
+    std::vector<PageId> cold;
+    cold.reserve(layout_->page_count());
+    scan_detail::BuildColdPages(hot, layout_->page_count(), cold);
+    ScanPagesBypass(cold, read_ts, result);
     result.main_scan_ms = scan_detail::ElapsedMs(started);
     return result;
   }
@@ -321,14 +353,61 @@ class TableScanner {
     }
   }
 
+  // 冷段直读（§10 hotfirst_bypass）：连续 run 先在池锁内判一次驻留
+  // （CollectMissRuns），切成极大未驻留子段整段直读进私有缓冲；判定后已
+  // 驻留的页照常走池（Fix，可能等待在途装载）。判定与直读之间被并发装载的
+  // 页仍直读——§7.2 O1 保证正确性，只是多读一次盘。
+  void ScanPagesBypass(std::span<const PageId> pages, Timestamp read_ts, ScanResult& result) {
+    const auto scan_row = [this, read_ts, &result](Row row) { ScanRow(row, read_ts, result); };
+    const size_t batch = std::max(base_pool_->prefetch_capacity(), size_t{1});
+    const size_t page_size = layout_->page_size();
+    std::vector<PageRun> misses;
+    size_t index = 0;
+    while (index < pages.size()) {
+      // 与 ScanPages 相同的连续 run 识别：冷段几乎整段连续，洞只在热页处。
+      size_t run = 1;
+      while (run < batch && index + run < pages.size() &&
+             pages[index + run] == pages[index + run - 1] + 1) {
+        ++run;
+      }
+      const PageId first = pages[index];
+      base_pool_->CollectMissRuns(first, run, misses);
+      size_t offset = 0;
+      size_t next_run = 0;
+      while (offset < run) {
+        if (next_run < misses.size() && misses[next_run].first == first + offset) {
+          const size_t count = misses[next_run].count;
+          base_pool_->ReadDirect(first + offset, count,
+                                 bypass_buffer_.span().first(count * page_size),
+                                 &result.base_stats);
+          for (size_t i = 0; i < count; ++i) {
+            ScanPageData(bypass_buffer_.span().subspan(i * page_size, page_size), scan_row);
+          }
+          offset += count;
+          ++next_run;
+        } else {
+          ScanPage(first + offset, result, scan_row);
+          ++offset;
+        }
+      }
+      index += run;
+    }
+  }
+
+  // 页内逐行：池路径与直读路径共用，判定逻辑只有一份（§9.2）。
+  template <typename OnRow>
+  void ScanPageData(std::span<std::byte> data, OnRow& on_row) {
+    const Page page(data, *layout_);
+    for (size_t slot = 0; slot < page.row_count(); ++slot) {
+      on_row(page.RowAt(slot));
+    }
+  }
+
   template <typename OnRow>
   void ScanPage(PageId id, ScanResult& result, OnRow& on_row) {
     Frame* frame = base_pool_->Fix(id, mode_, &result.base_stats);
     const PinGuard<BasePool> pin(*base_pool_, frame);
-    const Page page(frame->data, *layout_);
-    for (size_t slot = 0; slot < page.row_count(); ++slot) {
-      on_row(page.RowAt(slot));
-    }
+    ScanPageData(frame->data, on_row);
   }
 
   void ScanRow(Row row, Timestamp read_ts, ScanResult& result) {
@@ -382,6 +461,7 @@ class TableScanner {
   UndoPool* undo_pool_;
   const TableLayout* layout_;
   AccessMode mode_;
+  AlignedBuffer bypass_buffer_;
 };
 
 }  // namespace mvcc

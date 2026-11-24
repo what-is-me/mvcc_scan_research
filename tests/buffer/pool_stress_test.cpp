@@ -84,9 +84,9 @@ class PoolStress : public ::testing::Test {
   void RunStress() {
     const TableLayout layout(kPageSize, kRowSize, kPages * kRowsPerPage);
     test::MemoryPageFile file(layout.page_count(), layout.page_size());
-    using Pool = BufferPool<DirectPageTable, Replacer>;
+    using Pool = BufferPool<FrameHashTable, Replacer>;
     Pool pool(layout, kFrames, file, RowLockMode::kAllocate,
-              DirectPageTable(layout.page_count()),
+              FrameHashTable(kFrames),
               ReplacerFactory<Replacer>::Make(kFrames, layout.page_count()), PoolHooks(),
               kPrefetchPages);
 

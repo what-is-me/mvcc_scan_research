@@ -4,6 +4,7 @@
 #include <cstdint>
 
 namespace mvcc {
+
 namespace {
 
 constexpr uint64_t kHashMultiplier = 0x9E3779B97F4A7C15ull;
@@ -15,27 +16,6 @@ size_t NextPowerOfTwo(size_t value) {
 }
 
 }  // namespace
-
-DirectPageTable::DirectPageTable(size_t page_count) : slots_(page_count) {
-  for (size_t i = 0; i < slots_.size(); ++i) slots_[i].store(kNoFrame);
-}
-
-std::optional<size_t> DirectPageTable::Find(PageId page) const {
-  assert(page < slots_.size());
-  const size_t frame = slots_[page].load();
-  if (frame == kNoFrame) return std::nullopt;
-  return frame;
-}
-
-void DirectPageTable::Insert(PageId page, size_t frame) {
-  assert(page < slots_.size());
-  slots_[page].store(frame);
-}
-
-void DirectPageTable::Erase(PageId page) {
-  assert(page < slots_.size());
-  slots_[page].store(kNoFrame);
-}
 
 FrameHashTable::FrameHashTable(size_t frame_count)
     : buckets_(NextPowerOfTwo(frame_count * 2)),

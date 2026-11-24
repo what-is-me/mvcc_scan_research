@@ -22,7 +22,6 @@
 namespace mvcc {
 namespace {
 
-static_assert(PageMapping<DirectPageTable>);
 static_assert(PageMapping<FrameHashTable>);
 static_assert(FrameReplacer<LruReplacer>);
 
@@ -32,11 +31,11 @@ constexpr size_t kTableRows = 1000;
 
 TableLayout TestLayout() { return TableLayout(kPageSize, kRowSize, kTableRows); }
 
-using Pool = BufferPool<DirectPageTable, LruReplacer>;
+using Pool = BufferPool<FrameHashTable, LruReplacer>;
 
 Pool MakePool(const TableLayout& layout, size_t frame_count, PageFile& file,
               RowLockMode lock_mode = RowLockMode::kAllocate) {
-  return Pool(layout, frame_count, file, lock_mode, DirectPageTable(layout.page_count()),
+  return Pool(layout, frame_count, file, lock_mode, FrameHashTable(frame_count),
               LruReplacer(frame_count));
 }
 
@@ -323,9 +322,9 @@ TEST(BufferPool, FailedWriteBackLeavesTheFrameResident) {
 TEST(BufferPool, ArcReplacerKeepsInvariantsAcrossEvictions) {
   const TableLayout layout = TestLayout();
   test::MemoryPageFile file(layout.page_count(), layout.page_size());
-  BufferPool<DirectPageTable, ArcReplacer> pool(layout, 4, file, RowLockMode::kNone,
-                                                DirectPageTable(layout.page_count()),
-                                                ArcReplacer(4, layout.page_count()));
+  BufferPool<FrameHashTable, ArcReplacer> pool(layout, 4, file, RowLockMode::kNone,
+                                               FrameHashTable(4),
+                                               ArcReplacer(4, layout.page_count()));
 
   // 顺序访问整表，4 帧装不下，每一步都在淘汰。
   for (PageId page = 0; page < layout.page_count(); ++page) {
@@ -345,9 +344,8 @@ TEST(BufferPool, ArcReplacerKeepsInvariantsAcrossEvictions) {
 TEST(BufferPool, ClockWaiterWakesOnASingleUnpin) {
   const TableLayout layout = TestLayout();
   test::MemoryPageFile file(layout.page_count(), layout.page_size());
-  using ClockPool = BufferPool<DirectPageTable, ClockReplacer>;
-  ClockPool pool(layout, 2, file, RowLockMode::kNone, DirectPageTable(layout.page_count()),
-                 ClockReplacer(2));
+  using ClockPool = BufferPool<FrameHashTable, ClockReplacer>;
+  ClockPool pool(layout, 2, file, RowLockMode::kNone, FrameHashTable(2), ClockReplacer(2));
 
   Frame* first = pool.Fix(0, AccessMode::kNormal);
   Frame* second = pool.Fix(1, AccessMode::kNormal);
@@ -389,8 +387,8 @@ TEST(BufferPool, ClockWaiterWakesOnASingleUnpin) {
 TEST(BufferPool, FailedWriteBackKeepsTheVictimInItsArcTier) {
   const TableLayout layout = TestLayout();
   test::MemoryPageFile file(layout.page_count(), layout.page_size());
-  using ArcPool = BufferPool<DirectPageTable, ArcReplacer>;
-  ArcPool pool(layout, 3, file, RowLockMode::kNone, DirectPageTable(layout.page_count()),
+  using ArcPool = BufferPool<FrameHashTable, ArcReplacer>;
+  ArcPool pool(layout, 3, file, RowLockMode::kNone, FrameHashTable(3),
                ArcReplacer(3, layout.page_count()));
 
   Frame* zero = pool.Fix(0, AccessMode::kNormal);
@@ -419,8 +417,8 @@ TEST(BufferPool, FailedWriteBackKeepsTheVictimInItsArcTier) {
 TEST(BufferPool, FailedPrefetchLeavesNoReservedFrames) {
   const TableLayout layout = TestLayout();
   test::MemoryPageFile file(layout.page_count(), layout.page_size());
-  Pool pool(layout, 2, file, RowLockMode::kNone, DirectPageTable(layout.page_count()),
-            LruReplacer(2), PoolHooks(), 4);
+  Pool pool(layout, 2, file, RowLockMode::kNone, FrameHashTable(2), LruReplacer(2), PoolHooks(),
+            4);
 
   Frame* dirty = pool.Fix(0, AccessMode::kNormal);
   pool.MarkDirty(dirty);

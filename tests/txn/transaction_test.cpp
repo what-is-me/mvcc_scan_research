@@ -29,7 +29,7 @@ constexpr size_t kBaseFrames = 64;
 constexpr size_t kUndoFrames = 16;
 constexpr size_t kRowsPerTxn = 4;
 
-using BasePool = BufferPool<DirectPageTable, LruReplacer>;
+using BasePool = BufferPool<FrameHashTable, LruReplacer>;
 using UndoPool = BufferPool<FrameHashTable, LruReplacer>;
 using Txn = Transaction<BasePool, UndoPool>;
 
@@ -38,7 +38,7 @@ struct Env {
   test::MemoryPageFile base_file{layout.page_count(), layout.page_size(), test::PageFill::kZero};
   test::MemoryPageFile undo_file{kUndoPages, layout.page_size(), test::PageFill::kZero};
   BasePool base{layout, kBaseFrames, base_file, RowLockMode::kAllocate,
-                DirectPageTable(layout.page_count()), LruReplacer(kBaseFrames)};
+                FrameHashTable(kBaseFrames), LruReplacer(kBaseFrames)};
   UndoPool undo{layout, kUndoFrames, undo_file, RowLockMode::kNone, FrameHashTable(kUndoFrames),
                 LruReplacer(kUndoFrames)};
   UndoPageAllocator allocator;
@@ -222,7 +222,7 @@ TEST(Transaction, FailedPreFaultLeavesNoTrace) {
   const TableLayout layout(kPageSize, kRowSize, kTableRows);
   test::MemoryPageFile base_file(layout.page_count(), layout.page_size(), test::PageFill::kZero);
   test::MemoryPageFile undo_file(kUndoPages, layout.page_size(), test::PageFill::kZero);
-  BasePool base(layout, 1, base_file, RowLockMode::kAllocate, DirectPageTable(layout.page_count()),
+  BasePool base(layout, 1, base_file, RowLockMode::kAllocate, FrameHashTable(1),
                 LruReplacer(1));
   UndoPool undo(layout, 8, undo_file, RowLockMode::kNone, FrameHashTable(8), LruReplacer(8));
   UndoPageAllocator allocator;

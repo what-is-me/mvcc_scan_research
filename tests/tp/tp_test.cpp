@@ -32,7 +32,7 @@ constexpr size_t kUndoPages = 2400;
 constexpr size_t kPrefetch = 8;
 constexpr uint64_t kInitial = 0;
 
-using BasePool = BufferPool<DirectPageTable, LruReplacer>;
+using BasePool = BufferPool<FrameHashTable, LruReplacer>;
 using UndoPool = BufferPool<FrameHashTable, LruReplacer>;
 
 struct Env {
@@ -41,7 +41,7 @@ struct Env {
         base_file(layout.page_count(), layout.page_size(), test::PageFill::kZero),
         undo_file(undo_pages, layout.page_size(), test::PageFill::kZero),
         base(layout, kBaseFrames, base_file, RowLockMode::kAllocate,
-             DirectPageTable(layout.page_count()), LruReplacer(kBaseFrames), PoolHooks(), kPrefetch),
+             FrameHashTable(kBaseFrames), LruReplacer(kBaseFrames), PoolHooks(), kPrefetch),
         undo(layout, kUndoFrames, undo_file, RowLockMode::kNone, FrameHashTable(kUndoFrames),
              LruReplacer(kUndoFrames)),
         timestamps(kThreads),

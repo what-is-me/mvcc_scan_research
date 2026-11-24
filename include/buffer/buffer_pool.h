@@ -50,6 +50,12 @@ struct PoolStats {
   double hit_rate() const { return HitRate(logical_reads, logical_misses); }
 };
 
+// 连续页号的一段区间，CollectMissRuns 的输出单元。
+struct PageRun {
+  PageId first = 0;
+  size_t count = 0;
+};
+
 template <PageMapping Mapping, FrameReplacer Replacer>
 class BufferPool {
  public:
@@ -185,6 +191,49 @@ class BufferPool {
     }
     cv_.notify_all();
     return reserved_count;
+  }
+
+  // 在锁内一次判定 [first, first+count) 各页的驻留情况，切成极大未驻留子段
+  // 返回（升序、互不重叠）。在途装载的页视为驻留：Fix 会等到它装载完成，
+  // 比直读少一次设备往返。供冷段直读决定哪些子段绕过池，正确性依据 §7.2
+  // 的池外不变式 O1。
+  void CollectMissRuns(PageId first, size_t count, std::vector<PageRun>& out) const {
+    out.clear();
+    const std::lock_guard<std::mutex> lock(mutex_);
+    for (size_t offset = 0; offset < count; ++offset) {
+      if (table_.Find(static_cast<PageId>(first + offset))) continue;
+      if (!out.empty() && out.back().first + out.back().count == first + offset) {
+        ++out.back().count;
+      } else {
+        out.push_back({static_cast<PageId>(first + offset), 1});
+      }
+    }
+  }
+
+  // 直读一段未驻留页进调用方的缓冲：不经池帧、不 pin、不触碰替换策略，一次
+  // ReadPages 覆盖整段（§7.2 冷页查池直读）。调用方须先经 CollectMissRuns
+  // 确认未驻留；判定与读取之间被并发装载不影响正确性（O1），只是多读一次盘。
+  // 计数口径与预取一致：这些页是池没能满足的页请求，计入逻辑读与逻辑未命中；
+  // 物理读按页、读调用按次。dst 必须为 count * page_size 且扇区对齐。
+  void ReadDirect(PageId first, size_t count, std::span<std::byte> dst,
+                  PoolStats* sink = nullptr) {
+    assert(count >= 1);
+    assert(first < layout_.page_count() && count <= layout_.page_count() - first);
+    assert(dst.size() == count * layout_.page_size());
+    hooks_.Fire(PoolHookPoint::kBeforeFileRead);
+    file_.ReadPages(first, count, dst);
+    hooks_.Fire(PoolHookPoint::kAfterFileRead);
+
+    physical_reads_.fetch_add(count, std::memory_order_relaxed);
+    physical_read_ops_.fetch_add(1, std::memory_order_relaxed);
+    logical_reads_.fetch_add(count, std::memory_order_relaxed);
+    logical_misses_.fetch_add(count, std::memory_order_relaxed);
+    if (sink != nullptr) {
+      sink->logical_reads += count;
+      sink->logical_misses += count;
+      sink->physical_reads += count;
+      ++sink->physical_read_ops;
+    }
   }
 
   void MarkDirty(Frame* frame) { frame->dirty.store(true, std::memory_order_release); }

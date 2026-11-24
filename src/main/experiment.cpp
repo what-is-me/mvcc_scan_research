@@ -238,7 +238,8 @@ ExperimentSummary RunExperiment(const Config& config, const std::string& experim
 // 矩阵的遍历顺序即枚举声明顺序（§12）；id 里的名字与 JSON 的枚举字段共用
 // ToString，不会出现两套拼写。
 constexpr ScanPolicy kMatrixScanPolicies[] = {
-    ScanPolicy::kBaseline, ScanPolicy::kHotFirst, ScanPolicy::kDeferChain, ScanPolicy::kDeferPaged};
+    ScanPolicy::kBaseline, ScanPolicy::kHotFirst, ScanPolicy::kHotFirstBypass,
+    ScanPolicy::kDeferChain, ScanPolicy::kDeferPaged};
 constexpr Replacer kMatrixReplacers[] = {
     Replacer::kLru, Replacer::kClock, Replacer::kArc, Replacer::kLruK};
 

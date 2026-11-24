@@ -38,7 +38,7 @@ constexpr size_t kHotRows = 64;
 constexpr size_t kScans = 12;
 constexpr uint32_t kInitial = 0xFFFFFFFFu;
 
-using BasePool = BufferPool<DirectPageTable, LruReplacer>;
+using BasePool = BufferPool<FrameHashTable, LruReplacer>;
 using UndoPool = BufferPool<FrameHashTable, LruReplacer>;
 using Txn = Transaction<BasePool, UndoPool>;
 
@@ -48,7 +48,7 @@ struct Env {
         base_file(layout.page_count(), layout.page_size(), test::PageFill::kZero),
         undo_file(kUndoPages, layout.page_size(), test::PageFill::kZero),
         base(layout, kBaseFrames, base_file, RowLockMode::kAllocate,
-             DirectPageTable(layout.page_count()), LruReplacer(kBaseFrames), PoolHooks(), kPrefetch),
+             FrameHashTable(kBaseFrames), LruReplacer(kBaseFrames), PoolHooks(), kPrefetch),
         undo(layout, kUndoFrames, undo_file, RowLockMode::kNone, FrameHashTable(kUndoFrames),
              LruReplacer(kUndoFrames)),
         appender(allocator, layout),
