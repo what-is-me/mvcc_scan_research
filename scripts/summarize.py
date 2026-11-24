@@ -27,6 +27,7 @@ COLUMNS = [
     ("resolve_ms_p50", "resolve p50 (ms)"),
     ("base_hit_rate", "base hit"),
     ("base_logical_reads", "base reads"),
+    ("base_physical_reads", "base phys pages"),
     ("base_physical_read_ops", "base read ops"),
     ("undo_hit_rate", "undo hit"),
     ("undo_logical_reads", "undo reads"),
@@ -89,6 +90,7 @@ def Report(summaries):
         "",
         f"共 {len(summaries)} 轮（{first.get('page_size_kb', '?')} KB 页 × "
         f"{first.get('row_size_b', '?')} B 行 × {first.get('table_rows', '?')} 行，"
+        f"base_pool_mb={first.get('base_pool_mb', '?')}，undo_pool_mb={first.get('undo_pool_mb', '?')}，"
         f"tp_threads={first.get('tp_threads', '?')}，key_dist={first.get('key_dist', '?')}，"
         f"key_mapping={first.get('key_mapping', '?')}，duration_s={first.get('duration_s', '?')}）。",
         "",

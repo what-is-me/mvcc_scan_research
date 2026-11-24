@@ -23,6 +23,9 @@ on:
       undo_capacity_gb:
         description: undo 文件容量（GB）；时长超过约 130 s 时必须加大
         default: '16'
+      base_pool_mb:
+        description: 基表缓冲池大小（MB）；§11 池压力维度 32/64/128/256
+        default: '128'
   push:
     paths:
       - '.github/workflows/benchmark.yml'
@@ -68,6 +71,7 @@ jobs:
             duration_s=${{ inputs.duration_s || '10' }} \
             table_rows=${{ inputs.table_rows || '2000000' }} \
             undo_capacity_gb=${{ inputs.undo_capacity_gb || '16' }} \
+            base_pool_mb=${{ inputs.base_pool_mb || '128' }} \
             results_dir=results
       - name: Summarize into job summary
         run: |
