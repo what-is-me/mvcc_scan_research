@@ -49,7 +49,7 @@ jobs:
         run: ctest --output-on-failure
 
   benchmark:
-    name: full matrix (5 scan policies x 4 replacers x pool tiers)
+    name: full matrix (6 scan policies x 4 replacers x pool tiers)
     needs: gate
     runs-on: ubuntu-latest
     timeout-minutes: 90

@@ -76,6 +76,7 @@ constexpr EnumEntry<ScanPolicy> kScanPolicyEntries[] = {
     {"baseline", ScanPolicy::kBaseline},
     {"hotfirst", ScanPolicy::kHotFirst},
     {"hotfirst_bypass", ScanPolicy::kHotFirstBypass},
+    {"bypass_defer_paged", ScanPolicy::kBypassDeferPaged},
     {"defer_chain", ScanPolicy::kDeferChain},
     {"defer_paged", ScanPolicy::kDeferPaged},
 };
@@ -165,7 +166,9 @@ bool Config::Set(std::string_view key, std::string_view value, std::string* erro
   }
   if (key == "scan_policy") {
     if (!ParseEnum(kScanPolicyEntries, value, &scan_policy)) {
-      return invalid("baseline | hotfirst | hotfirst_bypass | defer_chain | defer_paged");
+      return invalid(
+          "baseline | hotfirst | hotfirst_bypass | bypass_defer_paged | defer_chain | "
+          "defer_paged");
     }
     return true;
   }

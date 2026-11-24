@@ -282,7 +282,8 @@ void ExpectPoliciesAgreeWithBaseline() {
   EXPECT_EQ(baseline.checksum, ExpectedChecksum(env.layout));
 
   const ScanPolicy others[] = {ScanPolicy::kHotFirst, ScanPolicy::kHotFirstBypass,
-                               ScanPolicy::kDeferChain, ScanPolicy::kDeferPaged};
+                               ScanPolicy::kBypassDeferPaged, ScanPolicy::kDeferChain,
+                               ScanPolicy::kDeferPaged};
   for (const ScanPolicy policy : others) {
     const ScanResult result = env.scanner.Scan(read_ts, policy);
     EXPECT_EQ(result.rows, baseline.rows);
@@ -490,6 +491,53 @@ TEST(TableScanner, HotFirstBypassWalksTheChainWhenDiskIsNewer) {
   EXPECT_EQ(result.chain_rows, 1u);
   EXPECT_EQ(result.chain_hops, 1u);
   EXPECT_EQ(result.checksum, ExpectedChecksum(env.layout));
+}
+
+// 组合策略（§10）：主扫描继承两条已验证的约束——冷段直读不进池、行处理
+// 全程不碰 undo 池；解析复用页式分桶。undo 记录自包含（存全行旧数据），
+// 直读页不在池中也不迫使解析阶段重读基表。
+TEST(TableScanner, BypassDeferMainKeepsUndoAndPoolUntouched) {
+  Env env(/*table_rows=*/128, /*base_frames=*/4, /*undo_frames=*/8, /*prefetch=*/4);
+  FillDerivedRows(env);
+  EXPECT_EQ(env.layout.page_count(), 4u);
+
+  // 快照取在提交之前：更新后的新版本对本次扫描不可见，那一行要走链。更新
+  // 落在热点页 2 上——若落在页 0/1，UpdateRow 会把它装进池，冷段就被吃掉了。
+  const Timestamp read_ts = env.timestamps.ReadTimestamp();
+  const std::vector<std::byte> updated(env.layout.data_size(), std::byte{0x77});
+  UpdateRow(env, RowId::Make(2, 5), updated, /*commit=*/true);
+
+  // 预装页 2、3 作为热点集合，冷段 = {0, 1} 直读。
+  env.base.Unpin(env.base.Fix(3, AccessMode::kNormal));
+  env.base.Unpin(env.base.Fix(2, AccessMode::kNormal));
+
+  TableScanner<BasePool, UndoPool> scanner(env.base, env.undo, env.layout);
+  DeferredScan scan = scanner.ScanBypassDeferMain(read_ts);
+
+  EXPECT_EQ(scan.result.rows, env.layout.row_count());
+  EXPECT_EQ(scan.result.chain_rows, 1u);
+  EXPECT_EQ(scan.result.chain_hops, 0u);
+  EXPECT_EQ(scan.pending.size(), 1u);
+  EXPECT_EQ(scan.result.undo_stats.logical_reads, 0u);
+  EXPECT_EQ(scan.result.undo_stats.physical_reads, 0u);
+  // 直读计数：冷段 {0,1} 计入逻辑读与未命中，合并成一次设备读。
+  EXPECT_EQ(scan.result.base_stats.logical_reads, 4u);
+  EXPECT_EQ(scan.result.base_stats.logical_misses, 2u);
+  EXPECT_EQ(scan.result.base_stats.physical_reads, 2u);
+  EXPECT_EQ(scan.result.base_stats.physical_read_ops, 1u);
+  // 直读页不进池：驻留集合仍是热点 {2, 3}。
+  std::vector<PageId> resident;
+  env.base.CollectResidentPages(resident);
+  std::sort(resident.begin(), resident.end());
+  EXPECT_EQ(resident, (std::vector<PageId>{2, 3}));
+
+  env.scanner.ResolveDeferredPaged(scan, read_ts);
+
+  EXPECT_TRUE(scan.pending.empty());
+  EXPECT_EQ(scan.result.chain_hops, 1u);
+  EXPECT_EQ(scan.result.checksum, ExpectedChecksum(env.layout));
+  // 解析阶段只装 1 个 undo 页（分桶去重后的页级访问）。
+  EXPECT_EQ(scan.result.undo_stats.logical_reads, 1u);
 }
 
 // I2 的窗口：读者先看到旧链头，写者随后追加记录并把链头换掉。判定失败时

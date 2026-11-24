@@ -16,7 +16,14 @@ import sys
 from pathlib import Path
 
 REPLACER_ORDER = ["lru", "clock", "arc", "lru_k"]
-POLICY_ORDER = ["baseline", "hotfirst", "hotfirst_bypass", "defer_chain", "defer_paged"]
+POLICY_ORDER = [
+    "baseline",
+    "hotfirst",
+    "hotfirst_bypass",
+    "bypass_defer_paged",
+    "defer_chain",
+    "defer_paged",
+]
 
 # 表格列：JSON 键名 -> 表头（单位已编码进键名）。
 COLUMNS = [
@@ -106,12 +113,16 @@ def Table(rows):
 
 def Report(summaries):
     first = summaries[0]
+    # 池档位列出全部出现过的取值（升序）：单档位时与旧输出一致，多档位
+    # 汇总时取第一个文件的值会与实际矩阵不符（曾把 8 组档位标成单值）。
+    bp_tiers = ",".join(str(v) for v in sorted({s.get("base_pool_mb", "?") for s in summaries}))
+    up_tiers = ",".join(str(v) for v in sorted({s.get("undo_pool_mb", "?") for s in summaries}))
     lines = [
         "## Benchmark 矩阵报告",
         "",
         f"共 {len(summaries)} 轮（{first.get('page_size_kb', '?')} KB 页 × "
         f"{first.get('row_size_b', '?')} B 行 × {first.get('table_rows', '?')} 行，"
-        f"base_pool_mb={first.get('base_pool_mb', '?')}，undo_pool_mb={first.get('undo_pool_mb', '?')}，"
+        f"base_pool_mb={bp_tiers}，undo_pool_mb={up_tiers}，"
         f"tp_threads={first.get('tp_threads', '?')}，key_dist={first.get('key_dist', '?')}，"
         f"key_mapping={first.get('key_mapping', '?')}，duration_s={first.get('duration_s', '?')}）。",
         "",

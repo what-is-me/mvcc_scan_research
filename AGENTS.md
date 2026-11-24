@@ -475,7 +475,7 @@ read_ts 的历史节点永远不会被触碰。扫描对某行实际遍历的跳
 
 ## 10. 扫描策略
 
-获取 read_ts 后执行。四种策略共用 §9.2 的可见性判定，差异只在页面访问
+获取 read_ts 后执行。六种策略共用 §9.2 的可见性判定，差异只在页面访问
 组织与版本解析时机：
 
 | 策略 | 主扫描 | 版本解析 | 动机 |
@@ -483,11 +483,16 @@ read_ts 的历史节点永远不会被触碰。扫描对某行实际遍历的跳
 | baseline | 按页号升序扫全部基表页 | 立即走链 | 参照系 |
 | hotfirst | 先扫热点页（快照瞬间固化），再扫其余页，均按页号升序 | 立即走链 | 利用常驻内存页，减少 I/O |
 | hotfirst_bypass | 热点段同 hotfirst；冷段查池直读文件（§7.2 O1），不经池帧 | 立即走链 | 冷段绕开 Fix/淘汰簿记与扫描驻留占用，不污染池 |
+| bypass_defer_paged | 热点段走池 + 冷段查池直读（同 hotfirst_bypass）；行处理同 defer——只记录 {重读后的 undo_row_id}，不触碰 undo 页 | 复用 defer 页式解析（按 undo 页分桶批量解析） | 两个已证收益正交（基表页 I/O 组织 × undo 解析时机），验证可叠加 |
 | defer | 按页号升序顺序扫描；需走链的行只记录 {重读后的 undo_row_id}（如需按行输出则连同行定位），不触碰 undo 页 | 主扫描结束后统一解析，两种方案见下 | 主扫描纯顺序化，undo 访问推迟并批量化 |
 
 补充约定：
 
-- **hotfirst 的热点集合必须在扫描开始瞬间固化**（hotfirst_bypass 同）：对
+- **组合策略的可行性依赖 undo 记录自包含**：undo 记录存全行旧数据，解析
+  阶段只访问 undo 页、不重读基表——直读页不在池中也不会迫使解析阶段再做
+  一轮全表 I/O。这个前提是 §9 的存储设计固有的，不是组合策略的特例。
+- **hotfirst 的热点集合必须在扫描开始瞬间固化**（hotfirst_bypass 与组合
+  策略同）：对
   基表页表做一次快照（收集非空条目），热点段 = 快照集合，冷段 = 全部页号
   − 快照集合。快照允许近似（与并发装载/淘汰竞争时无须精确），只影响性能
   不影响正确性。不固化的话，扫描与 TP 都会持续改变驻留状态，策略失去意义。
@@ -538,7 +543,7 @@ read_ts 的历史节点永远不会被触碰。扫描对某行实际遍历的跳
 | TP 键分布 | Zipf θ = 0.8 | 均匀 / 0.5 / 0.8 / 1.1 |
 | TP 键映射 | 散布（置换打乱） | 散布 / 头部集中 |
 | 每事务更新行数 | 1 | 1 / 4 / 16 |
-| 扫描策略 | baseline | baseline / hotfirst / hotfirst_bypass / defer_chain / defer_paged |
+| 扫描策略 | baseline | baseline / hotfirst / hotfirst_bypass / bypass_defer_paged / defer_chain / defer_paged |
 | 扫描触发间隔 | 1000 ms | 200 / 1000 / 2000 ms |
 | 扫描访问模式 | 扫描访问（不污染缓存） | 普通访问 / 扫描访问 |
 | 替换策略 | lru | lru / clock / arc / lru_k |
@@ -619,7 +624,7 @@ undo 文件容量上限 ≥ 估算值；每事务行数 ≤ 基表池帧数—�
 
 ### 指标（benchmark 层）
 
-实验矩阵 = 扫描策略 5 配置 × 替换策略 4 种；池大小档位是矩阵的扩展维度，
+实验矩阵 = 扫描策略 6 配置 × 替换策略 4 种；池大小档位是矩阵的扩展维度，
 由命令行列出、按笛卡尔积扩展（§12 入口）。每次实验采集：
 
 - 扫描端到端延迟（分主扫描与版本解析两段计时）；
@@ -652,7 +657,7 @@ undo 文件容量上限 ≥ 估算值；每事务行数 ≤ 基表池帧数—�
 
 - 入口 `mvcc_exp [config文件] [key=value ...] [--experiment-id=ID]`。配置文件
   默认 `config/default.cfg`，命令行逐项覆盖，解析与校验复用 Config。
-- `--matrix` 使入口串行跑完整个矩阵（扫描策略 5 × 替换策略 4，按枚举声明
+- `--matrix` 使入口串行跑完整个矩阵（扫描策略 6 × 替换策略 4，按枚举声明
   顺序），每轮 experiment_id = 前缀_策略名_替换器名，独立写出 exp_<id>.json；
   `--experiment-id` 给定的是前缀，默认仍取启动时刻。某轮失败即终止矩阵：
   已完成各轮的 JSON 已经落盘。矩阵只负责产出这批 JSON，跨实验的横向汇总
@@ -687,8 +692,8 @@ undo 文件容量上限 ≥ 估算值；每事务行数 ≤ 基表池帧数—�
   tp_latency_ms_p50, tp_latency_ms_p99, write_conflict_rate,
   undo_file_mb_end, chain_avg_hops
 
-枚举值：scan_policy ∈ {baseline, hotfirst, hotfirst_bypass, defer_chain,
-  defer_paged}；
+枚举值：scan_policy ∈ {baseline, hotfirst, hotfirst_bypass, bypass_defer_paged,
+  defer_chain, defer_paged}；
   replacer ∈ {lru, clock, arc, lru_k}；
   key_dist ∈ {uniform, zipf0.5, zipf0.8, zipf1.1}；
   key_mapping ∈ {scattered, head}；
@@ -760,7 +765,8 @@ Windows 只作本地开发，CI 全部在 Linux 上跑（§6 的 POSIX O_DIRECT 
 6. TP 多线程负载（Zipf + 置换表）：TSan 通过、终态 oracle 通过。
 7. 中途扫描校验（小规模）通过。
 8. 其余四种替换策略。
-9. hotfirst、hotfirst_bypass（冷段查池直读，§7.2）、defer（链式、页式）。
+9. hotfirst、hotfirst_bypass（冷段查池直读，§7.2）、bypass_defer_paged（组合）、
+   defer（链式、页式）。
 10. 实验装配：指标采集、JSON 输出（含 details 明细）、矩阵运行。
 
 ## 14. 未决问题（决策后更新正文并删除）

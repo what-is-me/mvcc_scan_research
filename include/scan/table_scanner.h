@@ -133,12 +133,13 @@ inline bool CheckBaseVersion(Row row, Timestamp read_ts, UndoRowId& cursor) {
 
 }  // namespace scan_detail
 
-// 全表扫描。四种策略共用页内逐行的可见性判定，差异只在页面访问组织与版本
+// 全表扫描。六种策略共用页内逐行的可见性判定，差异只在页面访问组织与版本
 // 解析时机（§10）：
-//   baseline        按页号升序扫，需要旧版本就立即沿 undo 链回溯；
-//   hotfirst        先扫扫描开始瞬间驻留的页，再扫其余页，两段都按页号升序；
-//   hotfirst_bypass 热点段同 hotfirst，冷段查池直读文件（§7.2 O1），不经池帧；
-//   defer           主扫描只记录链头，解析阶段再访问 undo 页（链式或按页分桶）。
+//   baseline           按页号升序扫，需要旧版本就立即沿 undo 链回溯；
+//   hotfirst           先扫扫描开始瞬间驻留的页，再扫其余页，两段按页号升序；
+//   hotfirst_bypass    热点段同 hotfirst，冷段查池直读文件（§7.2 O1），不经池帧；
+//   bypass_defer_paged hotfirst_bypass 的页面访问组织 × defer 的行处理与页式解析；
+//   defer              主扫描只记录链头，解析阶段再访问 undo 页（链式或按页分桶）。
 // 页按批预取，一次 Fix 覆盖整页的行——逐行 Fix 会给每行再加一次池锁往返。
 template <typename BasePool, typename UndoPool>
 class TableScanner {
@@ -167,6 +168,11 @@ class TableScanner {
         return ScanHotFirst(read_ts);
       case ScanPolicy::kHotFirstBypass:
         return ScanHotFirstBypass(read_ts);
+      case ScanPolicy::kBypassDeferPaged: {
+        DeferredScan scan = ScanBypassDeferMain(read_ts);
+        ResolveDeferredPaged(scan, read_ts);
+        return scan.result;
+      }
       case ScanPolicy::kDeferChain: {
         DeferredScan scan = ScanDeferMain(read_ts);
         ResolveDeferredChain(scan, read_ts);
@@ -235,6 +241,30 @@ class TableScanner {
     ScanPagesBypass(cold, read_ts, result);
     result.main_scan_ms = scan_detail::ElapsedMs(started);
     return result;
+  }
+
+  // 组合策略（§10）：主扫描 = hotfirst_bypass 的页面访问组织（热段走池、
+  // 冷段查池直读）× defer 的行处理（只记录链头，全程不碰 undo 池）；解析
+  // 阶段复用 ResolveDeferredPaged 按页分桶批量解析。两个收益正交：前者组织
+  // 基表页的 I/O，后者组织 undo 版本解析的时机与粒度。可行性依赖 undo 记录
+  // 自包含（存全行旧数据）——直读页不在池中，解析阶段不需要也无法重读基表。
+  DeferredScan ScanBypassDeferMain(Timestamp read_ts) {
+    DeferredScan scan;
+    const auto started = std::chrono::steady_clock::now();
+    const auto defer_row = [this, read_ts, &scan](Row row) {
+      ScanRowDefer(row, read_ts, scan.result, scan.pending);
+    };
+
+    std::vector<PageId> hot;
+    SnapshotHotPages(hot);
+    ScanPagesImpl(hot, scan.result, defer_row);
+
+    std::vector<PageId> cold;
+    cold.reserve(layout_->page_count());
+    scan_detail::BuildColdPages(hot, layout_->page_count(), cold);
+    ScanPagesBypassImpl(cold, scan.result, defer_row);
+    scan.result.main_scan_ms = scan_detail::ElapsedMs(started);
+    return scan;
   }
 
   // defer 第一阶段：与 baseline 完全相同的页访问组织与可见性判定，只把"走链"
@@ -332,9 +362,15 @@ class TableScanner {
   }
 
   // 按给定页号列表扫描，列表须升序。段内连续处成批预取，有洞就断开——
-  // hotfirst 的热点段通常稀疏，冷段则是一整段连续页号。
+  // hotfirst 的热点段通常稀疏，冷段则是一整段连续页号。行处理由 OnRow 决定：
+  // 立即解析（baseline/hotfirst/hotfirst_bypass）或 deferred 记录（组合策略）。
   void ScanPages(std::span<const PageId> pages, Timestamp read_ts, ScanResult& result) {
-    const auto scan_row = [this, read_ts, &result](Row row) { ScanRow(row, read_ts, result); };
+    auto scan_row = [this, read_ts, &result](Row row) { ScanRow(row, read_ts, result); };
+    ScanPagesImpl(pages, result, scan_row);
+  }
+
+  template <typename OnRow>
+  void ScanPagesImpl(std::span<const PageId> pages, ScanResult& result, OnRow& scan_row) {
     const size_t capacity = base_pool_->prefetch_capacity();
     size_t index = 0;
     while (index < pages.size()) {
@@ -356,9 +392,14 @@ class TableScanner {
   // 冷段直读（§10 hotfirst_bypass）：连续 run 先在池锁内判一次驻留
   // （CollectMissRuns），切成极大未驻留子段整段直读进私有缓冲；判定后已
   // 驻留的页照常走池（Fix，可能等待在途装载）。判定与直读之间被并发装载的
-  // 页仍直读——§7.2 O1 保证正确性，只是多读一次盘。
+  // 页仍直读——§7.2 O1 保证正确性，只是多读一次盘。行处理同样由 OnRow 决定。
   void ScanPagesBypass(std::span<const PageId> pages, Timestamp read_ts, ScanResult& result) {
-    const auto scan_row = [this, read_ts, &result](Row row) { ScanRow(row, read_ts, result); };
+    auto scan_row = [this, read_ts, &result](Row row) { ScanRow(row, read_ts, result); };
+    ScanPagesBypassImpl(pages, result, scan_row);
+  }
+
+  template <typename OnRow>
+  void ScanPagesBypassImpl(std::span<const PageId> pages, ScanResult& result, OnRow& scan_row) {
     const size_t batch = std::max(base_pool_->prefetch_capacity(), size_t{1});
     const size_t page_size = layout_->page_size();
     std::vector<PageRun> misses;
