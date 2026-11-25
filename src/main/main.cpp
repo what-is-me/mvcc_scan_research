@@ -68,7 +68,7 @@ std::string FormatTiers(const std::vector<size_t>& tiers, size_t fallback) {
 void PrintUsage() {
   std::cerr << "用法: mvcc_exp [--matrix] [config文件] [key=value ...] [--experiment-id=ID]\n"
             << "  config文件默认为 config/default.cfg；key=value 覆盖其中一项。\n"
-            << "  --matrix 按 4×4 矩阵逐轮跑完，--experiment-id 作为各轮 id 的前缀。\n"
+            << "  --matrix 按 6×4 矩阵逐轮跑完，--experiment-id 作为各轮 id 的前缀。\n"
             << "  --base-pool-mb=32,64,128  基表池档位列表（逗号分隔），矩阵按档位\n"
             << "                            笛卡尔积扩展，id 前缀追加 _bp<值>_up<值>。\n"
             << "  --undo-pool-mb=16,32,64   undo 池档位列表，语义同上。\n"
@@ -171,7 +171,7 @@ int main(int argc, char** argv) {
                           (undo_pool_tiers.empty() ? 1 : undo_pool_tiers.size());
     std::cout << "池档位: base_pool_mb = " << FormatTiers(base_pool_tiers, config.base_pool_mb)
               << " | undo_pool_mb = " << FormatTiers(undo_pool_tiers, config.undo_pool_mb)
-              << "（" << combos << " 组档位组合，每组一个 4×4 矩阵）\n";
+              << "（" << combos << " 组档位组合，每组一个 6×4 矩阵）\n";
   }
   std::cout << "experiment_id = " << experiment_id << "\n";
 
