@@ -6,7 +6,7 @@
 
     python3 scripts/summarize.py results/*.json
 
-shared runner（或任何虚拟环境）的性能有波动，绝对数字以本地为准；
+shared runner（或任何虚拟环境）的性能有波动，绝对数字不跨环境外推；
 同一轮次内各策略的对照是公平的，横向相对结论有效。
 """
 
@@ -62,17 +62,27 @@ def Format(value):
 
 
 def GroupByPolicy(summaries):
-    """按扫描策略分组；存在多个池档位时，档位并入组键并标注在标题里。"""
-    tiers = sorted({(s.get("base_pool_mb"), s.get("undo_pool_mb")) for s in summaries})
+    """按扫描策略分组；池档位/并发档位变化时，档位并入组键并标注在标题里。"""
+    tiers = sorted(
+        {
+            (s.get("base_pool_mb"), s.get("undo_pool_mb"), s.get("tp_threads"))
+            for s in summaries
+        }
+    )
     multi_tier = len(tiers) > 1
+    multi_pool = len({(t[0], t[1]) for t in tiers}) > 1
+    multi_tp = len({t[2] for t in tiers}) > 1
 
     groups = {}
     for summary in summaries:
-        policy = summary["scan_policy"]
-        if multi_tier:
-            key = (policy, summary.get("base_pool_mb"), summary.get("undo_pool_mb"))
-        else:
-            key = (policy,)
+        key = (
+            summary["scan_policy"],
+            summary.get("base_pool_mb"),
+            summary.get("undo_pool_mb"),
+            summary.get("tp_threads"),
+        )
+        if not multi_tier:
+            key = key[:1]
         groups.setdefault(key, []).append(summary)
 
     def group_rank(key):
@@ -92,8 +102,13 @@ def GroupByPolicy(summaries):
     result = []
     for key in sorted(groups, key=group_rank):
         label = key[0]
-        if multi_tier:
-            label += f" @ bp{key[1]}/up{key[2]}"
+        parts = []
+        if multi_pool:
+            parts.append(f"bp{key[1]}/up{key[2]}")
+        if multi_tp:
+            parts.append(f"t{key[3]}")
+        if parts:
+            label += " @ " + "/".join(parts)
         result.append((label, sorted(groups[key], key=row_rank)))
     return result
 
@@ -113,22 +128,23 @@ def Table(rows):
 
 def Report(summaries):
     first = summaries[0]
-    # 池档位列出全部出现过的取值（升序）：单档位时与旧输出一致，多档位
+    # 档位列出全部出现过的取值（升序）：单档位时与旧输出一致，多档位
     # 汇总时取第一个文件的值会与实际矩阵不符（曾把 8 组档位标成单值）。
     bp_tiers = ",".join(str(v) for v in sorted({s.get("base_pool_mb", "?") for s in summaries}))
     up_tiers = ",".join(str(v) for v in sorted({s.get("undo_pool_mb", "?") for s in summaries}))
+    tp_tiers = ",".join(str(v) for v in sorted({s.get("tp_threads", "?") for s in summaries}))
     lines = [
         "## Benchmark 矩阵报告",
         "",
         f"共 {len(summaries)} 轮（{first.get('page_size_kb', '?')} KB 页 × "
         f"{first.get('row_size_b', '?')} B 行 × {first.get('table_rows', '?')} 行，"
         f"base_pool_mb={bp_tiers}，undo_pool_mb={up_tiers}，"
-        f"tp_threads={first.get('tp_threads', '?')}，key_dist={first.get('key_dist', '?')}，"
+        f"tp_threads={tp_tiers}，key_dist={first.get('key_dist', '?')}，"
         f"key_mapping={first.get('key_mapping', '?')}，duration_s={first.get('duration_s', '?')}）。",
         "",
         "命中率 = 1 − 逻辑未命中/逻辑读（§12）；reads 为扫描端逻辑读，read ops 为设备读调用次数，",
-        "两者之比即预取摊销倍数。shared runner 性能有波动，绝对数字仅供参考，",
-        "同一环境内策略间的横向对比是公平的。",
+        "两者之比即预取摊销倍数。绝对数字不跨环境外推，同一环境内策略间的",
+        "横向对比是公平的。",
         "",
     ]
     for policy, rows in GroupByPolicy(summaries):

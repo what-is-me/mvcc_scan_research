@@ -691,6 +691,11 @@ undo 文件容量上限 ≥ 估算值；每事务行数 ≤ 基表池帧数—�
   **CI benchmark 默认只暴露基表池档位**；undo 池档位保留为本地/复现维度，
   不进 CI 矩阵输入——多轮 CI 未见它改变策略族层面的相对结论，证据见
   docs/experiment_notes.md §6。
+- CI 的并发档是一个**重复维度**：benchmark workflow 的 `tp_threads` 输入
+  接受逗号列表，对每个并发档各跑一遍完整矩阵，多档时 experiment_id 前缀
+  追加 `_t<值>`。它与池档位相乘，做并发对照时应把池档位固定为单档，避免
+  轮数失控。**Windows 本地实验只用于功能冒烟**；Windows 与 Linux 的 I/O
+  与调度差异足以改变计时和排序，计时与相对结论以 Linux CI 为准。
 - `experiment_id` 默认取启动时刻（`YYYYMMDD_HHMMSS`），可用命令行指定以便
   重跑同一编号；结果文件为 `results_dir/exp_<id>.json`，表文件在实验结束后
   删除——每轮实验都重建（§6），JSON 是唯一交付物。
@@ -736,7 +741,7 @@ details[]（数组，最后一个字段；元素按 scan_seq 升序，自 1 起�
 
 ### 持续集成（GitHub Actions，ubuntu-latest）
 
-Windows 只作本地开发，CI 全部在 Linux 上跑（§6 的 POSIX O_DIRECT 分支与
+Windows 只作本地开发与功能冒烟（计时与策略排序不以 Windows 为准），CI 全部在 Linux 上跑（§6 的 POSIX O_DIRECT 分支与
 §11 的参数约束在两平台语义一致；无缓冲 I/O 在 runner 的 ext4 上可用）：
 
 - **每次推送与 PR**：三个并行任务——RelWithDebInfo 全量单测、Debug 全量
@@ -771,11 +776,11 @@ Windows 只作本地开发，CI 全部在 Linux 上跑（§6 的 POSIX O_DIRECT 
   按需增长、capacity 只是防打穿的校验数字，调大不占磁盘。矩阵用例断言
   只有 ≥1 轮，duration 保持下限，避免 16 轮把套件时长拖爆。
 - **benchmark 手动触发**（workflow_dispatch）：先跑单测守门，再按输入的
-  时长/行数/undo 容量/池档位跑完整矩阵（`--matrix`，§12；池输入支持逗号
-  列表做档位扩展），汇总脚本 `scripts/summarize.py` 把这批 JSON 生成
-  Markdown 对照报告，写入 Job Summary 并随 artifact 上传。报告的绝对
-  数字以本地为准——shared runner 的 CPU 与磁盘有波动；同一环境内各组
-  配置的横向对比与跨次回归监测是它可靠的价值。
+  时长/行数/undo 容量/池档位/并发档位跑完整矩阵（`--matrix`，§12；池与
+  并发输入支持逗号列表做档位扩展），汇总脚本 `scripts/summarize.py` 把这
+  批 JSON 生成 Markdown 对照报告，写入 Job Summary 并随 artifact 上传。
+  长实验只在 CI 上跑；报告的绝对数字不跨环境外推——shared runner 的 CPU
+  与磁盘有波动，同一环境内各配置的横向对比与跨次回归监测是它可靠的价值。
 - runner 噪声有固定的识别特征：**跨策略一致的退化不是策略效应**。同一轮
   内某组配置（如某池档位）下全部策略的 TPS 同步大幅下挫，说明该格子的
   时段 runner 被抢占或 I/O 被干扰——策略互为对照，一致的方向就是环境
@@ -800,11 +805,11 @@ Windows 只作本地开发，CI 全部在 Linux 上跑（§6 的 POSIX O_DIRECT 
 
 ## 14. 未决问题（决策后更新正文并删除）
 
-1. **tp_threads 是否作为正式维度进入 benchmark 矩阵**：本地对照
-   （bp32 / LRU，8/16/32 线程）显示该维度有区分度——锁规避收益随并发
-   强度放大（最高并发档下 bypass_defer_paged 扫描延迟显著领先、TP
-   吞吐反升；中档并发下优势缩小且吞吐反降）。代价：矩阵从
-   24 轮膨胀为 72 轮（×3 档），CI 时长需重估。证据与未解释反常见
-   docs/experiment_notes.md §1.2 / §1.6。
+1. **tp_threads 是否作为正式维度进入 benchmark 矩阵**：CI benchmark 已支持
+   `tp_threads` 逗号列表（每个并发档重复一遍矩阵），待这批 CI 数据判断
+   是否固化进默认矩阵。本地对照（bp32 / LRU，8/16/32 线程）只作机制
+   线索——锁规避收益随并发强度放大，但中档并发的吞吐反转未解释；Windows
+   与 Linux 的差异使本地数字不能作为决策依据。代价：矩阵 24 → 72 轮。
+   证据与反常见 docs/experiment_notes.md §1.2 / §1.6。
 
 （新问题在此登记，决策后移入正文对应章节并从本节删除。）
