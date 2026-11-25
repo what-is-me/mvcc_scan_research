@@ -1,5 +1,5 @@
-# benchmark 手动触发：先跑单测守门，再按输入跑完整 5×4 矩阵（含
-# hotfirst_bypass），汇总脚本生成 Markdown 报告（Job Summary + artifact）。
+# benchmark 手动触发：先跑单测守门，再按输入跑完整 6×4 矩阵（6 种扫描策略
+# × 4 种替换器），汇总脚本生成 Markdown 报告（Job Summary + artifact）。
 #
 # runner 磁盘与 CPU 与本地不同：绝对数字以本地为准，CI 产出的价值是
 # 同一环境内配置组的横向对比与跨次回归监测。

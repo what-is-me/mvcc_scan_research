@@ -138,3 +138,17 @@ AGENTS.md §11 的设计意图。seed 固定，此核验可随时重放。
    侧差异在池全驻留时即已显现，档位只影响物理读绝对值。保留理由
    仅剩防 undo 池成为隐藏瓶颈（当前实验时长内 undo 文件远小于
    最小档位）。
+
+## 7. 数据批次与位置
+
+本文件不存数字，引用结论时按批次现抽：
+
+- **本地对照**：`build/mingw/results_cmp/`（未提交），Windows/MinGW +
+  NVMe，bp32、LRU、4 组并发/分布 × 4 策略，代码版本约 `499183f`
+  （2026-11-25 00:41–00:51 生成，此后无代码改动）。
+- **CI 完整矩阵 run 8**（experiment_id `ci_8`）：6 策略 × 4 替换器，
+  bp 32/64/128/256 × up 16/32，tp8、20 s、192 轮；artifact 本地副本在
+  `build/ci-45405490426/benchmark-8/`，确切 commit 以 GitHub run 8 记录为准。
+
+重抽命令：`python3 scripts/summarize.py <json...>`。新增批次时在此追加
+（日期、commit、命令、数据位置），不要只把 JSON 留在临时目录。

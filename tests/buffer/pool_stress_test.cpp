@@ -79,7 +79,7 @@ template <typename Replacer>
 class PoolStress : public ::testing::Test {
  protected:
   // 随机并发混合 Fix / Unpin / MarkDirty / Prefetch，周期性机械校验不变量。
-  // 五种策略跑同一套：ARC 的 tier / 幽灵双向链表、Clock 的 hand 与引用位都只在
+  // 四种策略跑同一套：ARC 的 tier / 幽灵双向链表、Clock 的 hand 与引用位都只在
   // 并发下才会被踩坏，单线程的选帧用例看不出来。
   void RunStress() {
     const TableLayout layout(kPageSize, kRowSize, kPages * kRowsPerPage);

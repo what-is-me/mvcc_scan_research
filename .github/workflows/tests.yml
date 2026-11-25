@@ -64,7 +64,7 @@ jobs:
       - name: Build
         run: cmake --build build-tsan
       # 单进程跑全量而不是 ctest 逐用例：TSan 运行时的进程初始化很重，
-      # 237 个用例各起一个进程会花掉十几分钟纯开销。失败时输出里带着
+      # 逐用例各起一个进程会花掉十几分钟纯开销。失败时输出里带着
       # [ RUN ] 用例名与 TSan 报告，定位足够。suppressions 文件只收录
       # AGENTS.md 明文认定的有意竞态（§6/I7 的数据区乐观读），清单之外
       # 的 race 一律视为真缺陷使任务变红。
