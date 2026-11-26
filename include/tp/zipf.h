@@ -19,20 +19,21 @@ constexpr double ZipfTheta(KeyDist dist) {
       return 0.5;
     case KeyDist::kZipf08:
       return 0.8;
-    case KeyDist::kZipf11:
-      return 1.1;
+    case KeyDist::kZipf095:
+      return 0.95;
   }
   return 0.0;
 }
 
 // YCSB 的近似 Zipf：P(rank) ∝ 1/(rank+1)^theta。返回值落在 [0, item_count)。
-// theta 越大越集中；theta = 1 时逆变换退化（alpha 无定义），不接受。
+// theta 越大越集中；逆变换要求 theta < 1（theta = 1 时 alpha 无定义，
+// theta > 1 时公式不再对应标准 Zipf 分布），不接受。
 class ZipfGenerator {
  public:
   ZipfGenerator(uint64_t item_count, double theta, uint64_t seed)
       : item_count_(item_count), theta_(theta), rng_(seed) {
     assert(item_count_ > 1);
-    assert(theta_ >= 0.0 && theta_ != 1.0);
+    assert(theta_ >= 0.0 && theta_ < 1.0);
 
     const double zeta_2 = 1.0 + std::pow(0.5, theta_);
     const double zeta_n = Zeta(item_count_);

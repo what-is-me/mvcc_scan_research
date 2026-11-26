@@ -59,7 +59,7 @@ constexpr EnumEntry<KeyDist> kKeyDistEntries[] = {
     {"uniform", KeyDist::kUniform},
     {"zipf0.5", KeyDist::kZipf05},
     {"zipf0.8", KeyDist::kZipf08},
-    {"zipf1.1", KeyDist::kZipf11},
+    {"zipf0.95", KeyDist::kZipf095},
 };
 
 constexpr EnumEntry<KeyMapping> kKeyMappingEntries[] = {
@@ -152,7 +152,7 @@ bool Config::Set(std::string_view key, std::string_view value, std::string* erro
   }
   if (key == "key_dist") {
     if (!ParseEnum(kKeyDistEntries, value, &key_dist)) {
-      return invalid("uniform | zipf0.5 | zipf0.8 | zipf1.1");
+      return invalid("uniform | zipf0.5 | zipf0.8 | zipf0.95");
     }
     return true;
   }

@@ -25,8 +25,11 @@ on:
         description: 基表缓冲池大小（MB）；支持逗号列表做档位矩阵，如 32,64,128,256
         default: '128'
       tp_threads:
-        description: TP 线程数；支持逗号列表做并发档位，如 8,16,32（每档各跑一遍矩阵）
+        description: TP 线程数；支持逗号列表做并发档位，如 1,2,4（每档各跑一遍矩阵）
         default: '8'
+      key_dist:
+        description: 键分布；uniform / zipf0.5 / zipf0.8 / zipf0.95
+        default: 'zipf0.8'
 
 permissions:
   contents: read
@@ -75,6 +78,7 @@ jobs:
               --base-pool-mb=${{ inputs.base_pool_mb || '128' }} \
               config/default.cfg \
               tp_threads="$tp" \
+              key_dist=${{ inputs.key_dist || 'zipf0.8' }} \
               duration_s=${{ inputs.duration_s || '10' }} \
               table_rows=${{ inputs.table_rows || '2000000' }} \
               undo_capacity_gb=${{ inputs.undo_capacity_gb || '16' }} \

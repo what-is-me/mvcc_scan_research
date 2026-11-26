@@ -80,7 +80,7 @@ TEST(ZipfGenerator, EveryConfiguredDistributionProducesAUsableTheta) {
   EXPECT_DOUBLE_EQ(ZipfTheta(KeyDist::kUniform), 0.0);
   EXPECT_DOUBLE_EQ(ZipfTheta(KeyDist::kZipf05), 0.5);
   EXPECT_DOUBLE_EQ(ZipfTheta(KeyDist::kZipf08), 0.8);
-  EXPECT_DOUBLE_EQ(ZipfTheta(KeyDist::kZipf11), 1.1);
+  EXPECT_DOUBLE_EQ(ZipfTheta(KeyDist::kZipf095), 0.95);
 
   constexpr uint64_t kRows = 64;
   ZipfGenerator uniform(kRows, ZipfTheta(KeyDist::kUniform), 1);

@@ -26,12 +26,14 @@ POLICY_ORDER = [
 ]
 
 # 表格列：JSON 键名 -> 表头（单位已编码进键名）。
+# 扫描延迟用 details 逐次耗时求平均（avg），p50 只作参考不再入表：
+# 扫描耗时分布可能双峰，p50 与实际总耗时脱节。
 COLUMNS = [
     ("scan_count", "scans"),
-    ("scan_latency_ms_p50", "scan p50 (ms)"),
+    ("scan_avg_ms", "scan avg (ms)"),
     ("scan_latency_ms_p99", "scan p99 (ms)"),
-    ("main_scan_ms_p50", "main p50 (ms)"),
-    ("resolve_ms_p50", "resolve p50 (ms)"),
+    ("main_avg_ms", "main avg (ms)"),
+    ("resolve_avg_ms", "resolve avg (ms)"),
     ("base_hit_rate", "base hit"),
     ("base_logical_reads", "base reads"),
     ("base_physical_reads", "base phys pages"),
@@ -56,6 +58,8 @@ def Load(paths):
 
 
 def Format(value):
+    if value is None:
+        return "-"
     if isinstance(value, float):
         return f"{value:.3f}"
     return str(value)
@@ -113,6 +117,13 @@ def GroupByPolicy(summaries):
     return result
 
 
+def DetailAverage(summary, fields):
+    details = summary.get("details") or []
+    if not details:
+        return None
+    return sum(sum(d.get(field, 0.0) for field in fields) for d in details) / len(details)
+
+
 def Table(rows):
     headers = ["replacer"] + [header for _, header in COLUMNS]
     lines = [
@@ -120,8 +131,12 @@ def Table(rows):
         "|" + "|".join("---" for _ in headers) + "|",
     ]
     for summary in rows:
+        values = dict(summary)
+        values["scan_avg_ms"] = DetailAverage(summary, ("main_scan_ms", "resolve_ms"))
+        values["main_avg_ms"] = DetailAverage(summary, ("main_scan_ms",))
+        values["resolve_avg_ms"] = DetailAverage(summary, ("resolve_ms",))
         cells = [summary["replacer"]]
-        cells += [Format(summary.get(key, "-")) for key, _ in COLUMNS]
+        cells += [Format(values.get(key)) if key in values else "-" for key, _ in COLUMNS]
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
@@ -143,8 +158,8 @@ def Report(summaries):
         f"key_mapping={first.get('key_mapping', '?')}，duration_s={first.get('duration_s', '?')}）。",
         "",
         "命中率 = 1 − 逻辑未命中/逻辑读（§12）；reads 为扫描端逻辑读，read ops 为设备读调用次数，",
-        "两者之比即预取摊销倍数。绝对数字不跨环境外推，同一环境内策略间的",
-        "横向对比是公平的。",
+        "两者之比即预取摊销倍数。扫描延迟取 details 的逐次平均（avg），p99 仅作尾部参考。",
+        "绝对数字不跨环境外推，同一环境内策略间的横向对比是公平的。",
         "",
     ]
     for policy, rows in GroupByPolicy(summaries):

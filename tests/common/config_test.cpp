@@ -75,7 +75,7 @@ TEST(Config, SetOverridesEveryKey) {
   ASSERT_TRUE(config.Set("undo_pool_mb", "16", &error)) << error;
   ASSERT_TRUE(config.Set("undo_capacity_gb", "4", &error)) << error;
   ASSERT_TRUE(config.Set("tp_threads", "16", &error)) << error;
-  ASSERT_TRUE(config.Set("key_dist", "zipf1.1", &error)) << error;
+  ASSERT_TRUE(config.Set("key_dist", "zipf0.95", &error)) << error;
   ASSERT_TRUE(config.Set("key_mapping", "head", &error)) << error;
   ASSERT_TRUE(config.Set("rows_per_txn", "4", &error)) << error;
   ASSERT_TRUE(config.Set("scan_policy", "defer_paged", &error)) << error;
@@ -92,7 +92,7 @@ TEST(Config, SetOverridesEveryKey) {
   EXPECT_EQ(config.undo_pool_mb, 16u);
   EXPECT_EQ(config.undo_capacity_gb, 4u);
   EXPECT_EQ(config.tp_threads, 16u);
-  EXPECT_EQ(config.key_dist, KeyDist::kZipf11);
+  EXPECT_EQ(config.key_dist, KeyDist::kZipf095);
   EXPECT_EQ(config.key_mapping, KeyMapping::kHead);
   EXPECT_EQ(config.rows_per_txn, 4u);
   EXPECT_EQ(config.scan_policy, ScanPolicy::kDeferPaged);
@@ -277,7 +277,7 @@ TEST(Config, EnumNamesMatchExperimentOutput) {
   EXPECT_STREQ(ToString(KeyDist::kUniform), "uniform");
   EXPECT_STREQ(ToString(KeyDist::kZipf05), "zipf0.5");
   EXPECT_STREQ(ToString(KeyDist::kZipf08), "zipf0.8");
-  EXPECT_STREQ(ToString(KeyDist::kZipf11), "zipf1.1");
+  EXPECT_STREQ(ToString(KeyDist::kZipf095), "zipf0.95");
   EXPECT_STREQ(ToString(KeyMapping::kScattered), "scattered");
   EXPECT_STREQ(ToString(KeyMapping::kHead), "head");
   EXPECT_STREQ(ToString(ScanAccessMode::kScan), "scan");
