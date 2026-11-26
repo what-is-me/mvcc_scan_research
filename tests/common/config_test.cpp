@@ -283,7 +283,7 @@ TEST(Config, EnumNamesMatchExperimentOutput) {
   EXPECT_STREQ(ToString(ScanAccessMode::kScan), "scan");
   EXPECT_STREQ(ToString(ScanAccessMode::kNormal), "normal");
   EXPECT_STREQ(ToString(ScanPolicy::kBaseline), "baseline");
-  EXPECT_STREQ(ToString(ScanPolicy::kHotFirst), "hotfirst");
+  EXPECT_STREQ(ToString(ScanPolicy::kHotFirstBypass), "hotfirst_bypass");
   EXPECT_STREQ(ToString(ScanPolicy::kDeferChain), "defer_chain");
   EXPECT_STREQ(ToString(ScanPolicy::kDeferPaged), "defer_paged");
   EXPECT_STREQ(ToString(Replacer::kLru), "lru");

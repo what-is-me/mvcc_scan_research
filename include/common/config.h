@@ -14,7 +14,6 @@ enum class KeyMapping { kScattered, kHead };
 enum class ScanAccessMode { kScan, kNormal };
 enum class ScanPolicy {
   kBaseline,
-  kHotFirst,
   kHotFirstBypass,
   kBypassDeferPaged,
   kDeferChain,

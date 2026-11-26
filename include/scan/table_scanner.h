@@ -41,7 +41,7 @@ struct ScanResult {
   uint64_t checksum = 0;
   PoolStats base_stats;
   PoolStats undo_stats;
-  // 两段耗时（毫秒）。baseline / hotfirst 只有主扫描，resolve_ms 恒为 0；
+  // 两段耗时（毫秒）。baseline / hotfirst_bypass 只有主扫描，resolve_ms 恒为 0；
   // defer 的主扫描与解析分别累计。计时放在这里而不是装配层：defer 的两段
   // 在扫描器内部才分得开，让每个调用点各自夹时钟只会复制同一段逻辑。
   double main_scan_ms = 0.0;
@@ -133,11 +133,11 @@ inline bool CheckBaseVersion(Row row, Timestamp read_ts, UndoRowId& cursor) {
 
 }  // namespace scan_detail
 
-// 全表扫描。六种策略共用页内逐行的可见性判定，差异只在页面访问组织与版本
+// 全表扫描。五种策略共用页内逐行的可见性判定，差异只在页面访问组织与版本
 // 解析时机（§10）：
 //   baseline           按页号升序扫，需要旧版本就立即沿 undo 链回溯；
-//   hotfirst           先扫扫描开始瞬间驻留的页，再扫其余页，两段按页号升序；
-//   hotfirst_bypass    热点段同 hotfirst，冷段查池直读文件（§7.2 O1），不经池帧；
+//   hotfirst_bypass    先扫扫描开始瞬间驻留的页，冷段查池直读文件（§7.2 O1），
+//                      不经池帧；
 //   bypass_defer_paged hotfirst_bypass 的页面访问组织 × defer 的行处理与页式解析；
 //   defer              主扫描只记录链头，解析阶段再访问 undo 页（链式或按页分桶）。
 // 页按批预取，一次 Fix 覆盖整页的行——逐行 Fix 会给每行再加一次池锁往返。
@@ -164,8 +164,6 @@ class TableScanner {
     switch (policy) {
       case ScanPolicy::kBaseline:
         return ScanBaseline(read_ts);
-      case ScanPolicy::kHotFirst:
-        return ScanHotFirst(read_ts);
       case ScanPolicy::kHotFirstBypass:
         return ScanHotFirstBypass(read_ts);
       case ScanPolicy::kBypassDeferPaged: {
@@ -195,7 +193,7 @@ class TableScanner {
     return result;
   }
 
-  // 热点集合在扫描开始这一刻固化（§10，hotfirst 与 hotfirst_bypass 共用）：
+  // 热点集合在扫描开始这一刻固化（§10，hotfirst_bypass 与组合策略共用）：
   // 对基表页表做一次快照，热点段 = 快照集合，冷段 = 全部页号 − 快照集合。
   // 不固化的话，扫描自己与 TP 都在持续改变驻留状态，冷热划分就退化成随机。
   // 快照允许近似——并发淘汰只让某一页从热段掉到冷段，扫到时重新装入，
@@ -209,24 +207,8 @@ class TableScanner {
     std::erase_if(hot, [this](PageId page) { return page >= layout_->page_count(); });
   }
 
-  ScanResult ScanHotFirst(Timestamp read_ts) {
-    const auto started = std::chrono::steady_clock::now();
-    ScanResult result;
-
-    std::vector<PageId> hot;
-    SnapshotHotPages(hot);
-    ScanPages(hot, read_ts, result);
-
-    std::vector<PageId> cold;
-    cold.reserve(layout_->page_count());
-    scan_detail::BuildColdPages(hot, layout_->page_count(), cold);
-    ScanPages(cold, read_ts, result);
-    result.main_scan_ms = scan_detail::ElapsedMs(started);
-    return result;
-  }
-
-  // hotfirst_bypass（§10）：热点段与 hotfirst 完全相同地走池；冷段查池直读
-  // （§7.2 O1）——不经池帧、不触碰替换策略，也不把冷页装进池挤占常驻页。
+  // hotfirst_bypass（§10）：热点段走池；冷段查池直读（§7.2 O1）——不经池帧、
+  // 不触碰替换策略，也不把冷页装进池挤占常驻页。
   ScanResult ScanHotFirstBypass(Timestamp read_ts) {
     const auto started = std::chrono::steady_clock::now();
     ScanResult result;
@@ -362,8 +344,8 @@ class TableScanner {
   }
 
   // 按给定页号列表扫描，列表须升序。段内连续处成批预取，有洞就断开——
-  // hotfirst 的热点段通常稀疏，冷段则是一整段连续页号。行处理由 OnRow 决定：
-  // 立即解析（baseline/hotfirst/hotfirst_bypass）或 deferred 记录（组合策略）。
+  // hotfirst_bypass 的热点段通常稀疏，冷段则是一整段连续页号。行处理由 OnRow
+  // 决定：立即解析（baseline/hotfirst_bypass）或 deferred 记录（组合策略）。
   void ScanPages(std::span<const PageId> pages, Timestamp read_ts, ScanResult& result) {
     auto scan_row = [this, read_ts, &result](Row row) { ScanRow(row, read_ts, result); };
     ScanPagesImpl(pages, result, scan_row);

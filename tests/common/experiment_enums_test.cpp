@@ -18,9 +18,9 @@ static_assert(std::is_same_v<std::remove_cvref_t<decltype(Config{}.key_mapping)>
 TEST(ExperimentEnums, ScanPolicyParsedFromConfigReachesTheScanner) {
   Config config;
   std::string error;
-  ASSERT_TRUE(config.Set("scan_policy", "hotfirst", &error)) << error;
-  EXPECT_EQ(config.scan_policy, ScanPolicy::kHotFirst);
-  EXPECT_STREQ(ToString(config.scan_policy), "hotfirst");
+  ASSERT_TRUE(config.Set("scan_policy", "hotfirst_bypass", &error)) << error;
+  EXPECT_EQ(config.scan_policy, ScanPolicy::kHotFirstBypass);
+  EXPECT_STREQ(ToString(config.scan_policy), "hotfirst_bypass");
 }
 
 TEST(ExperimentEnums, KeyMappingParsedFromConfigReachesTheMapper) {

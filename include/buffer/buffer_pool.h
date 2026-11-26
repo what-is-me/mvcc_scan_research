@@ -255,7 +255,7 @@ class BufferPool {
     return frame_count_ - free_.size();
   }
 
-  // 快照当前页表里的页号（hotfirst 用它固化热点集合）。与并发装载/淘汰
+  // 快照当前页表里的页号（hotfirst_bypass 用它固化热点集合）。与并发装载/淘汰
   // 竞争时结果允许近似——它只决定冷热两段的划分，不影响扫描的正确性：
   // 快照之后被淘汰的页，扫到时会重新装入。返回顺序不作保证。
   void CollectResidentPages(std::vector<PageId>& out) const {

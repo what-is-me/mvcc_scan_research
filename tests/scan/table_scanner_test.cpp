@@ -281,7 +281,7 @@ void ExpectPoliciesAgreeWithBaseline() {
   EXPECT_EQ(baseline.chain_hops, 5u);
   EXPECT_EQ(baseline.checksum, ExpectedChecksum(env.layout));
 
-  const ScanPolicy others[] = {ScanPolicy::kHotFirst, ScanPolicy::kHotFirstBypass,
+  const ScanPolicy others[] = {ScanPolicy::kHotFirstBypass,
                                ScanPolicy::kBypassDeferPaged, ScanPolicy::kDeferChain,
                                ScanPolicy::kDeferPaged};
   for (const ScanPolicy policy : others) {
@@ -295,7 +295,7 @@ void ExpectPoliciesAgreeWithBaseline() {
   txn.Abort();
 }
 
-TEST(TableScanner, HotFirstAgreesWithBaseline) {
+TEST(TableScanner, AllPoliciesAgreeWithBaseline) {
   ExpectPoliciesAgreeWithBaseline();
 }
 
@@ -378,31 +378,6 @@ TEST(TableScanner, DeferPagedFollowsChainsAcrossPages) {
   // 40 条记录跨两页：第一轮装页 1 解析 8 条，跨页后第二轮装页 0 走完。
   EXPECT_EQ(paged.undo_stats.logical_reads, 2u);
   EXPECT_EQ(baseline.undo_stats.logical_reads, 40u);
-}
-
-// hotfirst 的收益必须体现为物理读：热点页在快照里，先扫它们只花命中；baseline
-// 从页 0 顺序推进，冷页会把热点页挤出去，扫到热点页时还得重新读回来。
-//
-// 这个用例把扫描访问模式关掉：kScan 下新装入的页本就优先淘汰，扫描自己不会
-// 挤占常驻页，两种次序的 I/O 差异被这个模式掩盖。hotfirst 的收益只在
-// kNormal 下可见——两个模式的对照本身就是实验维度（§7.2）。
-TEST(TableScanner, HotFirstSavesTheReadsBaselinePaysFor) {
-  const auto run = [](ScanPolicy policy) {
-    Env env(/*table_rows=*/128, /*base_frames=*/2, /*undo_frames=*/8, /*prefetch=*/0);
-    FillDerivedRows(env);
-    EXPECT_EQ(env.layout.page_count(), 4u);
-
-    // 池里先装 2、3 两页，它们就是扫描开始瞬间的热点集合。
-    env.base.Unpin(env.base.Fix(3, AccessMode::kNormal));
-    env.base.Unpin(env.base.Fix(2, AccessMode::kNormal));
-
-    TableScanner<BasePool, UndoPool> scanner(env.base, env.undo, env.layout, AccessMode::kNormal);
-    const ScanResult result = scanner.Scan(1, policy);
-    return result.base_stats.physical_reads;
-  };
-
-  EXPECT_EQ(run(ScanPolicy::kHotFirst), 2u);   // 扫 2、3 命中；再读 0、1
-  EXPECT_EQ(run(ScanPolicy::kBaseline), 4u);   // 扫 0、1 时把 2、3 挤掉，又读回来
 }
 
 // hotfirst_bypass：冷段查池直读（§7.2 / §10）。热点页 2、3 预先装进池（即
@@ -578,7 +553,7 @@ TEST(TableScanner, LeavesTheCursorAloneWhenTheBaseVersionIsVisible) {
   EXPECT_TRUE(cursor.is_null());
 }
 
-// 两段耗时是 details[] 的两个字段，必须真的有人产出：baseline/hotfirst 只有
+// 两段耗时是 details[] 的两个字段，必须真的有人产出：baseline/hotfirst_bypass 只有
 // 主扫描，resolve_ms 恒为 0；defer 的两段分别累计。
 TEST(TableScanner, ReportsTwoStageTimings) {
   Env env;

@@ -226,8 +226,8 @@ TEST(TpWorkload, AllScanPoliciesAgreeUnderConcurrentTp) {
     });
   }
 
-  const ScanPolicy policies[] = {ScanPolicy::kBaseline, ScanPolicy::kHotFirst,
-                                 ScanPolicy::kDeferChain, ScanPolicy::kDeferPaged};
+  const ScanPolicy policies[] = {ScanPolicy::kBaseline, ScanPolicy::kDeferChain,
+                                 ScanPolicy::kDeferPaged};
   size_t live_samples = 0;
   for (int sample = 0; sample < 4; ++sample) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));

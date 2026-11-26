@@ -18,7 +18,7 @@ from pathlib import Path
 REPLACER_ORDER = ["lru", "clock", "arc", "lru_k"]
 POLICY_ORDER = [
     "baseline",
-    "hotfirst",
+    "hotfirst",  # 已从系统移除，保留用于 run 9/10 等旧批次汇总
     "hotfirst_bypass",
     "bypass_defer_paged",
     "defer_chain",

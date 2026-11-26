@@ -287,11 +287,11 @@ TEST(Experiment, MatrixRunsEveryScanPolicyReplacerPair) {
 
   Config config = TinyConfig(dir);
   config.scan_interval_ms = 100;
-  config.duration_s = 1;  // 断言只要 ≥1 轮：24 轮 × duration 是套件时长，保持下限
+  config.duration_s = 1;  // 断言只要 ≥1 轮：20 轮 × duration 是套件时长，保持下限
   const std::vector<ExperimentSummary> summaries = RunMatrix(config, "matrix");
 
-  ASSERT_EQ(summaries.size(), 6u * 4u);
-  const char* kScanPolicies[] = {"baseline", "hotfirst", "hotfirst_bypass", "bypass_defer_paged",
+  ASSERT_EQ(summaries.size(), 5u * 4u);
+  const char* kScanPolicies[] = {"baseline", "hotfirst_bypass", "bypass_defer_paged",
                                  "defer_chain", "defer_paged"};
   const char* kReplacers[] = {"lru", "clock", "arc", "lru_k"};
   size_t index = 0;
