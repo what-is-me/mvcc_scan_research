@@ -70,11 +70,13 @@ t8（TPS 无压力）下 baseline 最快，combo 落后。本地 NVMe 上一次�
 
 z11 组使用 theta=1.1。YCSB 逆变换要求 theta < 1；theta > 1 时公式不再
 对应标准 Zipf 分布，该组只能算无效压力探针，不能作为机制证据。配置已
-改为 `zipf0.95`，z11 的结论（baseline 延迟下降、combo 落后）待 CI 用合法
-theta 复测。原待验证假设保留在此仅作线索：TP 写流量上升后，combo 的多次
-同步直读调用与写回竞争磁盘队列，单次调用延迟放大；若成立，候选对策是
-"整段连驻留页一起读、读后丢弃"（预取已接受同样的浪费，§7.5）——属设计
-变更，须先改文档再动代码。
+改为 `zipf0.95`，并用 CI run 11（tp2、bp32、40 s，合法 theta）复测：
+combo 与 hotfirst_bypass 在 4 个替换器中的 3 个几乎同值（895 vs 902 ms），
+未复现"combo 反而最慢"；clock 下 combo 单点为 1385 ms，但同格 TPS 也从
+2521 掉到 1607，属整轮环境干扰，不是策略效应。原假设（多次同步直读与
+写回竞争磁盘队列）在本轮不成立；若后续用更小 undo 池/更长时长制造真实
+undo I/O 后再观察。候选对策"整段连驻留页一起读"仍属设计变更，须先改
+文档再动代码。
 
 ### 1.6 t16 combo 的 TPS 反常下降（本地现象，CI 未复现）
 
@@ -128,6 +130,13 @@ CI run 9 在 Linux 上以 8/16/32 三档（4 vCPU runner 上均属超订）复�
   tp1/tp4 的 defer_paged 无此现象。按"同组配置一致退化是环境信号"剔除，
   不作为策略效应。该轮 undo 池仍全程驻留（undo 物理读为 0），defer 两
   种解析方案的差异依旧不可测。
+- **合法高倾斜 zipf0.95 不改变策略族结论**：run 11（tp2、bp32、40 s、5×4）
+  中 bypass 族在 lru/arc/lru_k 下占据扫描延迟前二；clock 下 hotfirst_bypass
+  仍第一（907 ms），combo 单点 1385 ms 但整轮 TPS 同步掉到 1607，判为环境
+  干扰。相对 baseline，bypass 扫描 avg 约 902 vs 1157（1.28×），TP 吞吐
+  2521 vs 2015（+25%）；链均跳数 1.35 vs 1.07，冲突率仍为 0，undo 仍全
+  驻留。高倾斜的主要效果是提高 TPS、略微加深扫描窗口内的版本链，不改变
+  bypass 的领先方向。
 
 ## 3. 热行分布核验（scattered 映射）
 
@@ -193,6 +202,9 @@ AGENTS.md §11 的设计意图。seed 固定，此核验可随时重放。
   tp 1/2/4，zipf0.8、bp32、40 s、72 轮；artifact 本地副本在
   `build/ci-45850224420/benchmark-10/`，代码 `cb2b96d`（普通 hotfirst 已
   在 `6de1c0c` 移除，本轮数据只用于仍在系统中的 5 策略）。结论见 §2。
+- **CI 高倾斜实验 run 11**（experiment_id `ci_11_*`）：5 策略 × 4 替换器，
+  zipf0.95、tp2、bp32、40 s、20 轮；artifact 本地副本在
+  `build/ci-45859497913/benchmark-11/`，代码 `528c801`。结论见 §1.5/§2。
 
 重抽命令：`python3 scripts/summarize.py <json...>`。新增批次时在此追加
 （日期、commit、命令、数据位置），不要只把 JSON 留在临时目录。
