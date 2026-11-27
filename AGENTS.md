@@ -681,7 +681,7 @@ undo 文件容量上限 ≥ 估算值；每事务行数 ≤ 基表池帧数—�
 
 - 入口 `mvcc_exp [config文件] [key=value ...] [--experiment-id=ID]`。配置文件
   默认 `config/default.cfg`，命令行逐项覆盖，解析与校验复用 Config。
-- `--matrix` 使入口串行跑完整个矩阵（扫描策略 6 × 替换策略 4，按枚举声明
+- `--matrix` 使入口串行跑完整个矩阵（扫描策略 5 × 替换策略 4，按枚举声明
   顺序），每轮 experiment_id = 前缀_策略名_替换器名，独立写出 exp_<id>.json；
   `--experiment-id` 给定的是前缀，默认仍取启动时刻。某轮失败即终止矩阵：
   已完成各轮的 JSON 已经落盘。矩阵只负责产出这批 JSON，跨实验的横向汇总
@@ -693,7 +693,8 @@ undo 文件容量上限 ≥ 估算值；每事务行数 ≤ 基表池帧数—�
   组合先逐个校验再开跑，任一档非法即整批拒绝、不落任何盘。
   **CI benchmark 默认只暴露基表池档位**；undo 池档位保留为本地/复现维度，
   不进 CI 矩阵输入——多轮 CI 未见它改变策略族层面的相对结论，证据见
-  docs/experiment_notes.md §6。
+  docs/experiment_notes.md §6。workflow 另留单值 `undo_pool_mb` 输入，仅
+  用于强制 undo 换出的定向实验（如 up16 + 120 s），不做档位矩阵。
 - CI 的并发档是一个**重复维度**：benchmark workflow 的 `tp_threads` 输入
   接受逗号列表，对每个并发档各跑一遍完整矩阵，多档时 experiment_id 前缀
   追加 `_t<值>`。它与池档位相乘，做并发对照时应把池档位固定为单档，避免

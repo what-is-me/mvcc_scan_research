@@ -24,6 +24,9 @@ on:
       base_pool_mb:
         description: 基表缓冲池大小（MB）；支持逗号列表做档位矩阵，如 32,64,128,256
         default: '128'
+      undo_pool_mb:
+        description: undo 缓冲池大小（MB）；留空用配置默认（64），小池用于强制 undo 换出
+        default: ''
       tp_threads:
         description: TP 线程数；支持逗号列表做并发档位，如 1,2,4（每档各跑一遍矩阵）
         default: '8'
@@ -68,6 +71,10 @@ jobs:
         run: |
           set -euo pipefail
           IFS=',' read -ra TP_TIERS <<< "${{ inputs.tp_threads || '8' }}"
+          undo_args=()
+          if [ -n "${{ inputs.undo_pool_mb || '' }}" ]; then
+            undo_args+=(--undo-pool-mb="${{ inputs.undo_pool_mb }}")
+          fi
           for tp in "${TP_TIERS[@]}"; do
             suffix=""
             if [ "${#TP_TIERS[@]}" -gt 1 ]; then
@@ -76,6 +83,7 @@ jobs:
             ./build/bin/mvcc_exp --matrix \
               --experiment-id="ci_${{ github.run_number }}${suffix}" \
               --base-pool-mb=${{ inputs.base_pool_mb || '128' }} \
+              "${undo_args[@]}" \
               config/default.cfg \
               tp_threads="$tp" \
               key_dist=${{ inputs.key_dist || 'zipf0.8' }} \
