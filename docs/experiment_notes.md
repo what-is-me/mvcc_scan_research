@@ -137,6 +137,19 @@ CI run 9 在 Linux 上以 8/16/32 三档（4 vCPU runner 上均属超订）复�
   2521 vs 2015（+25%）；链均跳数 1.35 vs 1.07，冲突率仍为 0，undo 仍全
   驻留。高倾斜的主要效果是提高 TPS、略微加深扫描窗口内的版本链，不改变
   bypass 的领先方向。
+- **undo 换出不等于读 miss；页式解析更快但绝对成本可忽略**：run 12
+  （up16、120 s、tp2、zipf0.95）中 undo 文件增至 9~20 MB，说明脏页确实
+  被淘汰写回，但 `undo_physical_reads` 仍为 0、命中率 1.000——扫描需要的
+  undo 活跃窗口约为"扫描时长 × 更新速率"（~1 s × 2.4k 行/s × 112 B，
+  不足 1 MB），远小于 16 MB 池，被淘汰的旧页不会再被读回。
+  解析段本身可分开了：`defer_chain` resolve 约 0.18~0.28 ms/次、
+  `defer_paged` 约 0.07~0.12 ms/次（约 2.5×），undo 逻辑读每轮
+  11.5 万 vs 0.76 万（约 15×）；但相对主扫描 ~1.2 s，节省不足 0.02%，
+  端到端不可见。页式的收益要等"活跃窗口 > undo 池"或链工作量大幅上升
+  才会兑现，当前参数下两种方案都只需保留、无需据此排序。
+  bypass 族在这组参数下仍领先（中位 921/968 vs baseline 1242 ms）；
+  clock 下 hotfirst_bypass、lru_k 下 defer_paged 各有一个整轮变慢的单点，
+  按环境干扰剔除。
 
 ## 3. 热行分布核验（scattered 映射）
 
@@ -205,6 +218,9 @@ AGENTS.md §11 的设计意图。seed 固定，此核验可随时重放。
 - **CI 高倾斜实验 run 11**（experiment_id `ci_11_*`）：5 策略 × 4 替换器，
   zipf0.95、tp2、bp32、40 s、20 轮；artifact 本地副本在
   `build/ci-45859497913/benchmark-11/`，代码 `528c801`。结论见 §1.5/§2。
+- **CI undo 换出实验 run 12**（experiment_id `ci_12_*`）：5 策略 × 4 替换器，
+  zipf0.95、tp2、bp32、up16、120 s、20 轮；artifact 本地副本在
+  `build/ci-46019932773/benchmark-12/`，代码 `0b01db4`。结论见 §2。
 
 重抽命令：`python3 scripts/summarize.py <json...>`。新增批次时在此追加
 （日期、commit、命令、数据位置），不要只把 JSON 留在临时目录。
