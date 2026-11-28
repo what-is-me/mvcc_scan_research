@@ -105,7 +105,8 @@ CI run 9 在 Linux 上以 8/16/32 三档（4 vCPU runner 上均属超订）复�
   defer_paged——热段快照与冷区归并两次额外页表遍历在无 I/O 可省时
   全是纯开销。bypass 的收益有"必须存在可省的 I/O"这个前提。run 8 取
   bp256/up16 格与 run 13 严格同配置；run 13 复现 defer_paged 第一。
-  run 14 整轮降速（TPS 约 0.58×）但排序不变，按环境信号剔除幅度比较。
+  run 14 整轮降速（TPS 约 0.58×），defer_paged 仍第一，但整轮按环境
+  信号剔除，不做幅度比较。
 - **替换器敏感性减半**：bypass 系策略跨替换器的延迟差异显著小于
   baseline 系——扫描绕开池路径后，替换器行为对扫描的影响被解耦。
 - **Clock 在 baseline 系下多次扫描垫底**：run 9 的 bp32 档、run 10 的
@@ -220,8 +221,9 @@ AGENTS.md §11 的设计意图。seed 固定，此核验可随时重放。
 ## 7. 数据批次与位置
 
 本文件不存数字，引用结论时按批次现抽。**数据链路**：CI artifact 是权威
-来源；下文 `build/ci-*/...` 是下载后的本地副本，未提交、可能被清理。
-重抽时先用 `gh run download <run_id>` 取回，再运行 `summarize.py`。
+来源；下文 `build/ci-*/...` 是下载后的本地副本，当前仍在本地但未提交、
+随时可能被清理。重抽时先用 `gh run download <run_id>` 取回，再运行
+`summarize.py`。
 
 - **本地对照（仅机制线索）**：`build/mingw/results_cmp/`（未提交），
   Windows/MinGW + NVMe，bp32、LRU、4 组并发/分布 × 4 策略，代码版本约
@@ -246,7 +248,8 @@ AGENTS.md §11 的设计意图。seed 固定，此核验可随时重放。
   `build/ci-46019932773/benchmark-12/`，代码 `0b01db4`。结论见 §2。
 - **CI 全驻留重复 run 13/14**（experiment_id `ci_13_*` / `ci_14_*`）：
   bp256、up16、tp8、20 s、zipf0.8，各 20 轮；run 13 复现 defer_paged
-  领先，run 14 整轮降速（TPS 约 0.58×、扫描约 2×）但排序不变。artifact
+  领先，run 14 整轮降速（TPS 约 0.58×、扫描约 2×），defer_paged 仍
+  第一但整轮剔除。artifact
   本地副本在 `build/ci-46106377393/benchmark-13/`、
   `build/ci-46106390789/benchmark-14/`，代码 `4cf0cd4`。结论见 §2。
 - **CI Clock 单点重复 run 15–18**：run 15/16 重复 run 11 配置
