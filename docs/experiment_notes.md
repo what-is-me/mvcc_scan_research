@@ -159,6 +159,12 @@ CI run 9 在 Linux 上以 8/16/32 三档（4 vCPU runner 上均属超订）复�
   clock 下 hotfirst_bypass、lru_k 下 defer_paged 各有一个整轮变慢的单点，
   按环境干扰剔除。run 17/18 重复该配置，clock/hotfirst_bypass 为 1.00×/
   0.98×，确认单轮噪声；lru_k/defer_paged 单点未单独重复。
+- **run 17/18 的 defer_paged 主扫描异常（待查）**：up16/120 s 两次重复中
+  `defer_paged` 主扫描 1722/1711 ms、TPS 1229/1388，明显慢于 `defer_chain`
+  1128/1111（约 1.5×），4 个替换器一致；但 resolve 仍 0.08 ms，主扫描
+  代码与 `defer_chain` 相同，undo 物理读为 0，且同格 TP TPS 下降、p99
+  升到 30~42 ms。run 17 从首扫即慢，run 18 前半约 1100、后半跳至约
+  1786；两次运行并发且都在矩阵末尾，倾向 runner 级干扰，待单独重复确认。
 
 ## 3. 热行分布核验（scattered 映射）
 
@@ -241,7 +247,8 @@ AGENTS.md §11 的设计意图。seed 固定，此核验可随时重放。
   clock/hotfirst_bypass 1.00×/0.98×，原异常未复现；run 16 整轮降速。
   artifact 本地副本在 `build/ci-46107333902/benchmark-15/`、
   `build/ci-46107345176/benchmark-16/`、`build/ci-46108998967/benchmark-17/`、
-  `build/ci-46109011437/benchmark-18/`，代码 `bbafbd0`。结论见 §1.5/§2。
+  `build/ci-46109011437/benchmark-18/`，代码 `bbafbd0`。run 17/18 还暴露
+  `defer_paged` 主扫描异常，见 §2 待查条目。
 
 重抽命令：`python3 scripts/summarize.py <json...>`。新增批次时在此追加
 （日期、commit、命令、数据位置），不要只把 JSON 留在临时目录。
