@@ -62,6 +62,8 @@ resolve_ms` 的均值），p99 只作尾部参考。p50 不作为主指标：扫
 | run 11 | 5 策略 × 4 替换器，zipf0.95，tp2，bp32，40 s | 合法高倾斜对照 |
 | run 12 | 5 策略 × 4 替换器，zipf0.95，tp2，bp32，up16，120 s | undo 换出与 defer 两段耗时 |
 | run 13/14 | 5 策略 × 4 替换器，bp256，up16，tp8，20 s，重复两次 | §6.2 全驻留领先复现 |
+| run 15/16 | 5 策略 × 4 替换器，zipf0.95，tp2，bp32，40 s，重复两次 | §6.1 Clock/combo 重复检验 |
+| run 17/18 | 5 策略 × 4 替换器，zipf0.95，tp2，bp32，up16，120 s，重复两次 | §6.1 Clock/hotfirst_bypass 重复检验 |
 
 run 8~10 使用移除普通 hotfirst 之前的 6 策略代码；本报告只引用其中仍在
 系统中的 5 种策略。run 11/12 使用当前 5 策略代码。
@@ -147,12 +149,13 @@ run 12 在 up16、120 s、zipf0.95、tp2 下测到：
 ### 3.4 替换策略：bypass 会削弱替换器的影响
 
 - **baseline 系**：Clock 多次出现扫描延迟最差。run 9 的 bp32 档、run 10 的
-  tp1 档、run 12 的 tp2 档都能看到 Clock 的 baseline 扫描慢于 LRU；
-  机制上 Clock 只给“第二次机会”，对全表顺序扫描的冷页保护弱于 LRU。
+  tp1 档、run 12 与 run 18 的 tp2 档都能看到 Clock 的 baseline 扫描慢于
+  LRU；机制上 Clock 只给“第二次机会”，对全表顺序扫描的冷页保护弱于 LRU。
 - **bypass 系**：冷段直读绕开池，替换器对扫描的影响被解耦；跨替换器的
-  扫描延迟差异明显收窄。ARC/LRU/LRU-K 之间没有稳定赢家，部分档位出现
-  单轮异常（run 11 的 clock/combo、run 12 的 clock/hotfirst_bypass 与
-  lru_k/defer_paged），按环境干扰剔除后排序不稳定。
+  扫描延迟差异明显收窄。ARC/LRU/LRU-K 之间没有稳定赢家。run 11 的
+  clock/combo 与 run 12 的 clock/hotfirst_bypass 单点已由 run 15 与
+  run 17/18 重复排除，clock 格回到其他替换器水平（约 1.00×）；其他单格
+  异常（如 lru_k/defer_paged）仍按环境信号剔除。
 - **全驻留**：替换器差异进一步缩小；run 8/13/14 的全驻留档均由
   `defer_paged` 领先，而不是任何 bypass 策略。
 
@@ -192,29 +195,27 @@ Clock；ARC/LRU-K 的额外复杂度在当前负载下没有稳定回报。
 - **整块退化与单格异常要分开**：run 10 的 tp2/defer_paged 是 4 个替换器
   整块一致退化（TPS 与扫描同时下降），run 14 的全驻留重复是整轮降速
   （所有策略扫描约 2×、TPS 约 0.58×），都按“同组一致退化=环境信号”
-  确定性剔除幅度比较；run 11 的 clock/combo、run 12 的
-  clock/hotfirst_bypass 与 lru_k/defer_paged 是单格异常，Clock 交互未
-  隔离。报告采用跨替换器中位；单格排序不据此下结论。
+  确定性剔除幅度比较。run 11 的 clock/combo 与 run 12 的
+  clock/hotfirst_bypass 已用 run 15 与 run 17/18 同配置重复，clock 格
+  回到其他替换器水平（约 1.00×），归为单轮环境干扰；lru_k/defer_paged
+  等其他单格异常仍按环境信号剔除。报告采用跨替换器中位；单格排序不据此
+  下结论。
 - **Windows 本地数据**：仅用于功能冒烟，不用于计时与策略排序。
 
 ## 6. 未解释现象与后续工作
 
-1. **Clock 与 bypass 的单轮异常**：run 11 的 clock/combo、run 12 的
-   clock/hotfirst_bypass 各出现一次整轮变慢，且方向相反；同格 TPS 同步
-   下降，倾向环境干扰，但 Clock 本身是否有放大效应未隔离。需要重复实验
-   才能把“环境”与“Clock + bypass”的交互分开。
-2. **全驻留下 defer_paged 的领先来源**：run 8 与 run 13 两次同配置重复
+1. **全驻留下 defer_paged 的领先来源**：run 8 与 run 13 两次同配置重复
    均以 `defer_paged` 第一，run 14 整轮降速但仍第一，稳定性已确认；尚未
    拆开的是领先的 5~10 ms 来自 defer 的解析时机、扫描顺序还是替换器
    交互，需要插桩或增加对照。
-3. **TPS 饱和的瓶颈分解**：当前只观察到聚合吞吐饱和，未拆分池锁等待、
+2. **TPS 饱和的瓶颈分解**：当前只观察到聚合吞吐饱和，未拆分池锁等待、
    行锁冲突、磁盘队列与 CPU 调度各自的占比；“锁规避维度”的强弱因此只能
    按 tp 档位间接判断。
-4. **undo 活跃窗口 > 池的场景**：run 12 只制造了写回，没有制造读 miss；
+3. **undo 活跃窗口 > 池的场景**：run 12 只制造了写回，没有制造读 miss；
    要验证页式的 I/O 收益，需要更小的 undo 池、更高的更新速率或更长的
    扫描窗口。这属于参数实验，不改代码；若需要突破当前 16 MB 下限，先改
    AGENTS 的取值范围再动实现。
-5. **跨平台**：Linux CI 的 O_DIRECT 行为与 Windows 的 NO_BUFFERING 不完全
+4. **跨平台**：Linux CI 的 O_DIRECT 行为与 Windows 的 NO_BUFFERING 不完全
    相同；计时结论不跨平台外推。
 
 ## 7. 复现

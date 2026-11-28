@@ -73,7 +73,9 @@ z11 组使用 theta=1.1。YCSB 逆变换要求 theta < 1；theta > 1 时公式�
 改为 `zipf0.95`，并用 CI run 11（tp2、bp32、40 s，合法 theta）复测：
 combo 与 hotfirst_bypass 在 4 个替换器中的 3 个几乎同值（895 vs 902 ms），
 未复现"combo 反而最慢"；clock 下 combo 单点为 1385 ms，但同格 TPS 也从
-2521 掉到 1607，属整轮环境干扰，不是策略效应。原假设（多次同步直读与
+2521 掉到 1607，属整轮环境干扰，不是策略效应。run 15 同配置重复中
+clock/combo 为 1.02×，异常未复现；run 16 整轮降速，按环境信号剔除。
+原假设（多次同步直读与
 写回竞争磁盘队列）在本轮不成立；若后续用更小 undo 池/更长时长制造真实
 undo I/O 后再观察。候选对策"整段连驻留页一起读"仍属设计变更，须先改
 文档再动代码。
@@ -138,7 +140,8 @@ CI run 9 在 Linux 上以 8/16/32 三档（4 vCPU runner 上均属超订）复�
 - **合法高倾斜 zipf0.95 不改变策略族结论**：run 11（tp2、bp32、40 s、5×4）
   中 bypass 族在 lru/arc/lru_k 下占据扫描延迟前二；clock 下 hotfirst_bypass
   仍第一（907 ms），combo 单点 1385 ms 但整轮 TPS 同步掉到 1607，判为环境
-  干扰。相对 baseline，bypass 扫描 avg 约 902 vs 1157（1.28×），TP 吞吐
+  干扰；run 15 重复 clock/combo 回到 1.02×，确认单轮噪声。相对 baseline，
+  bypass 扫描 avg 约 902 vs 1157（1.28×），TP 吞吐
   2521 vs 2015（+25%）；链均跳数 1.35 vs 1.07，冲突率仍为 0，undo 仍全
   驻留。高倾斜的主要效果是提高 TPS、略微加深扫描窗口内的版本链，不改变
   bypass 的领先方向。
@@ -154,7 +157,8 @@ CI run 9 在 Linux 上以 8/16/32 三档（4 vCPU runner 上均属超订）复�
   才会兑现，当前参数下两种方案都只需保留、无需据此排序。
   bypass 族在这组参数下仍领先（中位 921/968 vs baseline 1242 ms）；
   clock 下 hotfirst_bypass、lru_k 下 defer_paged 各有一个整轮变慢的单点，
-  按环境干扰剔除。
+  按环境干扰剔除。run 17/18 重复该配置，clock/hotfirst_bypass 为 1.00×/
+  0.98×，确认单轮噪声；lru_k/defer_paged 单点未单独重复。
 
 ## 3. 热行分布核验（scattered 映射）
 
@@ -231,6 +235,13 @@ AGENTS.md §11 的设计意图。seed 固定，此核验可随时重放。
   领先，run 14 整轮降速（TPS 约 0.58×、扫描约 2×）但排序不变。artifact
   本地副本在 `build/ci-46106377393/benchmark-13/`、
   `build/ci-46106390789/benchmark-14/`，代码 `4cf0cd4`。结论见 §2。
+- **CI Clock 单点重复 run 15–18**：run 15/16 重复 run 11 配置
+  （zipf0.95、tp2、bp32、40 s），run 17/18 重复 run 12 配置（另加 up16、
+  120 s）；各 20 轮。run 15 clock/combo 1.02×、run 17/18
+  clock/hotfirst_bypass 1.00×/0.98×，原异常未复现；run 16 整轮降速。
+  artifact 本地副本在 `build/ci-46107333902/benchmark-15/`、
+  `build/ci-46107345176/benchmark-16/`、`build/ci-46108998967/benchmark-17/`、
+  `build/ci-46109011437/benchmark-18/`，代码 `bbafbd0`。结论见 §1.5/§2。
 
 重抽命令：`python3 scripts/summarize.py <json...>`。新增批次时在此追加
 （日期、commit、命令、数据位置），不要只把 JSON 留在临时目录。
