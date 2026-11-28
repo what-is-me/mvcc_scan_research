@@ -67,7 +67,7 @@ resolve_ms` 的均值），p99 只作尾部参考。p50 不作为主指标：扫
 | run 19 | 5 策略 × 4 替换器，同 run 12 配置，单独重复一次 | 并发 run 干扰对照 |
 
 run 8~10 使用移除普通 hotfirst 之前的 6 策略代码；本报告只引用其中仍在
-系统中的 5 种策略。run 11/12 使用当前 5 策略代码。
+系统中的 5 种策略。run 11 起使用当前 5 策略代码。
 
 所有计时结论以 Linux CI 为准。Windows 本地实验只用于功能冒烟：两平台的
 I/O 与调度差异足以改变计时和排序。CI runner 为 4 vCPU，shared runner 的
@@ -170,7 +170,7 @@ Clock；ARC/LRU-K 的额外复杂度在当前负载下没有稳定回报。
 |---|---|---|
 | 表远大于池（bp32，表/池约 8×），Linux CI runner 盘（本项目口径的慢盘），tp1/2（tp3 未实测） | `hotfirst_bypass` | 扫描 avg 的 baseline/bypass 比值约 1.1~1.4（run 10/11/12）；TP 吞吐 tp1/tp2 +35%（run 10，zipf0.8）、tp2 +25%（run 11，zipf0.95） |
 | 同上，但需要两阶段可观测 | `hotfirst_bypass` 或 `bypass_defer_paged` | 两者扫描延迟中位差异在噪声内；组合策略多一段解析开销 |
-| 表全驻留（bp256，run 8/13/14） | `defer_paged` | 没有可省的 I/O；bypass 的热段快照与冷区归并两次额外页表遍历是纯开销。数据上 defer 系整体快于 baseline，主扫描不穿插 undo 访问是候选解释；run 8/13 两次同配置重复均领先，run 14 整轮降速但仍第一，领先幅度约 5~10 ms，归因未完全拆开（§6.2） |
+| 表全驻留（bp256，run 8/13/14） | `defer_paged` | 没有可省的 I/O；bypass 的热段快照与冷区归并两次额外页表遍历是纯开销。数据上 defer 系整体快于 baseline，主扫描不穿插 undo 访问是候选解释；run 8/13 两次同配置重复均领先，run 14 整轮降速但仍第一，领先幅度约 5~10 ms，归因未完全拆开（§6 第 1 项） |
 | 慢盘，且慢在每页传输而非每次调用固定延迟 | bypass 系 | 物理页数约 −20%、读调用约 2.4×（run 10 tp1）；传输主导时净收益为正，HDD 类调用延迟主导时可能为负 |
 | 4 vCPU，tp4+ | bypass 系（仅扫描延迟） | TP 吞吐优势被 CPU 饱和吃掉；扫描延迟优势仍在 |
 | undo 活跃窗口远小于池（当前原型） | 任意；defer 两种解析等价 | 解析段 <0.02% 端到端；页式只减少逻辑读/CPU |
@@ -229,6 +229,9 @@ Clock；ARC/LRU-K 的额外复杂度在当前负载下没有稳定回报。
 - run 11：`benchmark` workflow，`key_dist=zipf0.95`、`tp_threads=2`、
   `base_pool_mb=32`、`duration_s=40`。
 - run 12：同上，另加 `undo_pool_mb=16`、`duration_s=120`。
+- run 13/14、15/16、17/18、19 等重复批次沿用对应命令，只重复派发；串行
+  执行，不与其他 benchmark run 并发。具体 run id 与 artifact 见
+  experiment_notes.md §7。
 - 汇总：`python3 scripts/summarize.py 'results/*.json'`；报告表格由 JSON
   重新生成，不手抄数字。
 - 原始 artifact 与本地副本位置见 experiment_notes.md §7；每个批次的
