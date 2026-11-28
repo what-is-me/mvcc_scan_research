@@ -103,11 +103,15 @@ CI run 9 在 Linux 上以 8/16/32 三档（4 vCPU runner 上均属超订）复�
   冷段切碎；净收益取决于盘慢在页传输还是每次调用的固定延迟。
 - **全驻留固定税**：表全驻留（I/O ≈ 0）的池档位下 combo 慢于
   defer_paged——热段快照与冷区归并两次额外页表遍历在无 I/O 可省时
-  全是纯开销。bypass 的收益有"必须存在可省的 I/O"这个前提。run 13
-  同配置重复复现 defer_paged 第一；run 14 整轮降速（TPS 约 0.58×）
-  但排序不变，按环境信号剔除幅度比较。
+  全是纯开销。bypass 的收益有"必须存在可省的 I/O"这个前提。run 8 取
+  bp256/up16 格与 run 13 严格同配置；run 13 复现 defer_paged 第一。
+  run 14 整轮降速（TPS 约 0.58×）但排序不变，按环境信号剔除幅度比较。
 - **替换器敏感性减半**：bypass 系策略跨替换器的延迟差异显著小于
   baseline 系——扫描绕开池路径后，替换器行为对扫描的影响被解耦。
+- **Clock 在 baseline 系下多次扫描垫底**：run 9 的 bp32 档、run 10 的
+  tp1 档、run 12 与 run 18 的 tp2 档中，Clock 的 baseline 扫描 avg 高于
+  LRU（run 12 约 1.18×、run 18 约 1.23×）；bypass 系该差异收窄。格级
+  数字以 CI artifact 为准，机制未完全拆开。
 - **runner 噪声识别**：个别池档位下出现过全部策略 TPS 同步大幅
   下挫，判定为 runner 干扰并剔除。识别规则已写入 AGENTS.md §12：
   跨策略一致的退化是环境信号，不是策略效应。
@@ -155,6 +159,8 @@ CI run 9 在 Linux 上以 8/16/32 三档（4 vCPU runner 上均属超订）复�
   11.5 万 vs 0.76 万（约 15×）；但相对主扫描 ~1.2 s，节省不足 0.02%，
   端到端不可见。页式的收益要等"活跃窗口 > undo 池"或链工作量大幅上升
   才会兑现，当前参数下两种方案都只需保留、无需据此排序。
+  `bypass_defer_paged` 的解析段约 0.05 ms/次（run 10/11 artifact），
+  比 `hotfirst_bypass` 多一段解析，中位差异在噪声内。
   bypass 族在这组参数下仍领先（中位 921/968 vs baseline 1242 ms）；
   clock 下 hotfirst_bypass、lru_k 下 defer_paged 各有一个整轮变慢的单点，
   按环境干扰剔除。run 17/18 重复该配置，clock/hotfirst_bypass 为 1.00×/
@@ -213,7 +219,9 @@ AGENTS.md §11 的设计意图。seed 固定，此核验可随时重放。
 
 ## 7. 数据批次与位置
 
-本文件不存数字，引用结论时按批次现抽：
+本文件不存数字，引用结论时按批次现抽。**数据链路**：CI artifact 是权威
+来源；下文 `build/ci-*/...` 是下载后的本地副本，未提交、可能被清理。
+重抽时先用 `gh run download <run_id>` 取回，再运行 `summarize.py`。
 
 - **本地对照（仅机制线索）**：`build/mingw/results_cmp/`（未提交），
   Windows/MinGW + NVMe，bp32、LRU、4 组并发/分布 × 4 策略，代码版本约
