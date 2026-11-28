@@ -101,7 +101,9 @@ CI run 9 在 Linux 上以 8/16/32 三档（4 vCPU runner 上均属超订）复�
   冷段切碎；净收益取决于盘慢在页传输还是每次调用的固定延迟。
 - **全驻留固定税**：表全驻留（I/O ≈ 0）的池档位下 combo 慢于
   defer_paged——热段快照与冷区归并两次额外页表遍历在无 I/O 可省时
-  全是纯开销。bypass 的收益有"必须存在可省的 I/O"这个前提。
+  全是纯开销。bypass 的收益有"必须存在可省的 I/O"这个前提。run 13
+  同配置重复复现 defer_paged 第一；run 14 整轮降速（TPS 约 0.58×）
+  但排序不变，按环境信号剔除幅度比较。
 - **替换器敏感性减半**：bypass 系策略跨替换器的延迟差异显著小于
   baseline 系——扫描绕开池路径后，替换器行为对扫描的影响被解耦。
 - **runner 噪声识别**：个别池档位下出现过全部策略 TPS 同步大幅
@@ -224,6 +226,11 @@ AGENTS.md §11 的设计意图。seed 固定，此核验可随时重放。
 - **CI undo 换出实验 run 12**（experiment_id `ci_12_*`）：5 策略 × 4 替换器，
   zipf0.95、tp2、bp32、up16、120 s、20 轮；artifact 本地副本在
   `build/ci-46019932773/benchmark-12/`，代码 `0b01db4`。结论见 §2。
+- **CI 全驻留重复 run 13/14**（experiment_id `ci_13_*` / `ci_14_*`）：
+  bp256、up16、tp8、20 s、zipf0.8，各 20 轮；run 13 复现 defer_paged
+  领先，run 14 整轮降速（TPS 约 0.58×、扫描约 2×）但排序不变。artifact
+  本地副本在 `build/ci-46106377393/benchmark-13/`、
+  `build/ci-46106390789/benchmark-14/`，代码 `4cf0cd4`。结论见 §2。
 
 重抽命令：`python3 scripts/summarize.py <json...>`。新增批次时在此追加
 （日期、commit、命令、数据位置），不要只把 JSON 留在临时目录。
